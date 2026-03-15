@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# UploadThing Environment Setup Script
+# This file documents the exact setup required for UploadThing v6
+
+# =============================================================================
+# 🔒 REQUIRED: .env.local (NEVER Commit This File)
+# =============================================================================
+# File: .env.local (in root directory)
+# Purpose: Local development secrets (overrides .env)
+# 
+# Add these lines:
+# 
+# UPLOADTHING_SECRET=sk_live_[get_from_dashboard]
+# UPLOADTHING_APP_ID=[get_from_dashboard]
+#
+# To find these values:
+# 1. Visit https://uploadthing.com/dashboard
+# 2. Create app or select existing one
+# 3. Go to API Keys section
+# 4. Copy UPLOADTHING_SECRET and UPLOADTHING_APP_ID
+# 5. Save in .env.local
+
+# =============================================================================
+# ⚠️  FORMAT REQUIREMENTS
+# =============================================================================
+# 1. UPLOADTHING_SECRET = starts with "sk_live_" (NOT a token)
+# 2. UPLOADTHING_APP_ID = simple string (e.g., "y5672cnswe")
+# 3. NO quotes around values: KEY=value (NOT KEY="value")
+# 4. NO spaces: KEY=value (NOT KEY = value)
+
+# =============================================================================
+# ✅ VERIFY SETUP
+# =============================================================================
+# Run this to verify env variables are loaded:
+
+# On macOS/Linux:
+echo "UPLOADTHING_SECRET=$UPLOADTHING_SECRET"
+echo "UPLOADTHING_APP_ID=$UPLOADTHING_APP_ID"
+
+# On Windows PowerShell:
+# $env:UPLOADTHING_SECRET
+# $env:UPLOADTHING_APP_ID
+
+# =============================================================================
+# 🚀 START DEVELOPMENT SERVER
+# =============================================================================
+# npm run dev
+
+# Server should log:
+# ✅ UploadThing Configuration Loaded:
+#    - Secret: sk_live_ad...
+#    - App ID: y5672cnswe
+
+# =============================================================================
+# 📝 TEST UPLOAD
+# =============================================================================
+# 1. Sign in with Clerk
+# 2. Use UploadDropzone component with endpoint="agencyLogo"
+# 3. Upload an image file (max 4MB)
+# 4. Check server logs for: "✅ Agency logo uploaded by user: [userId]"
+# 5. Image URL should appear in client response
+
+# =============================================================================
+# 🐛 TROUBLESHOOTING
+# =============================================================================
+# 
+# Issue: "UploadThingError: No secret provided"
+# → Check .env.local has UPLOADTHING_SECRET
+# → Restart dev server after adding to .env.local
+# 
+# Issue: "400 Bad Request"
+# → Verify UPLOADTHING_SECRET format (starts with sk_live_)
+# → Check UPLOADTHING_APP_ID is correct
+# → Verify no extra spaces in .env.local
+# 
+# Issue: "401 Unauthorized"
+# → User must be logged in via Clerk
+# → Check Clerk configuration is correct
+# 
+# Issue: "Env vars not detected"
+# → Next.js caches .env on startup
+# → Restart dev server: Ctrl+C then npm run dev
