@@ -54,6 +54,7 @@
     "date-fns": "^3.3.1",
     "embla-carousel-react": "^8.6.0",
     "framer-motion": "^11.18.2",
+    "inngest": "^4.1.0",
     "lucide-react": "^0.576.0",
     "next": "14.2.25",
     "next-cloudinary": "^6.17.5",
@@ -63,7 +64,7 @@
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "react-hook-form": "^7.50.1",
-    "react-resizable-panels": "^4.6.5",
+    "react-resizable-panels": "^4.8.0",
     "sonner": "^1.4.0",
     "tailwind-merge": "^2.2.1",
     "tailwind-scrollbar": "^3.0.5",
@@ -74,7 +75,7 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
-    "@types/node": "^20.19.34",
+    "@types/node": "^20.19.37",
     "@types/react": "18.2.48",
     "@types/react-dom": "18.2.18",
     "autoprefixer": "^10.0.1",

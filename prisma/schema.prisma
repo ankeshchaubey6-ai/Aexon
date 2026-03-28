@@ -154,6 +154,7 @@ model SubAccount {
   tags           Tag[]
   notifications  Notification[]
   payments       Payment[]
+  
 
   @@index([agencyId])
 }
@@ -513,4 +514,37 @@ model Payment {
   @@index([agencyId])
   @@index([subAccountId])
   @@index([funnelId])
+}
+// Add this relation inside the SubAccount model:
+//   aiProjects    AIProject[]
+
+model AIProject {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  description  String?  @db.Text
+  subAccountId String
+
+  files AIProjectFile[]
+
+  @@map("AIProject")
+  @@index([subAccountId])
+}
+
+model AIProjectFile {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  path      String   @db.VarChar(500)
+  content   String   @db.LongText
+  projectId String
+
+  project AIProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("AIProjectFile")
+  @@unique([projectId, path])
+  @@index([projectId])
 }

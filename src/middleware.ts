@@ -7,9 +7,12 @@ export default clerkMiddleware((auth, req) => {
 
   const res = NextResponse.next();
 
-  // 🔥 REQUIRED FOR WEB CONTAINER
-  res.headers.set("Cross-Origin-Opener-Policy", "same-origin");
-  res.headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+  // Only apply WebContainer headers on AI builder routes
+  const isAIBuilder = url.pathname.includes("/ai-builder");
+  if (isAIBuilder) {
+    res.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+    res.headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+  }
 
   // Allow main localhost app
   if (hostname === "localhost:3000") {

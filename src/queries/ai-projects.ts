@@ -25,21 +25,34 @@ export const getAIProjects = async (subaccountId: string) => {
 };
 
 // =========================
-// ➕ CREATE PROJECT
+// ➕ CREATE PROJECT (FIXED)
 // =========================
-export const createAIProject = async (project: AIProject) => {
+export const createAIProject = async (
+  project: Omit<AIProject, "createdAt" | "updatedAt">
+): Promise<AIProject> => {
   const existing = inMemoryProjects.get(project.subaccountId) || [];
+
+  const now = new Date().toISOString();
+
+  const fullProject: AIProject = {
+    ...project,
+    createdAt: now,        // ✅ FIX
+    updatedAt: now,        // ✅ optional but good practice
+  };
 
   // Avoid duplicates — overwrite if same id already stored
   const withoutDuplicate = existing.filter((p) => p.id !== project.id);
 
-  inMemoryProjects.set(project.subaccountId, [...withoutDuplicate, project]);
+  inMemoryProjects.set(project.subaccountId, [
+    ...withoutDuplicate,
+    fullProject,
+  ]);
 
   console.log(
     `✅ Project ${project.id} stored under subaccount ${project.subaccountId}`
   );
 
-  return project;
+  return fullProject;
 };
 
 // =========================
@@ -50,12 +63,11 @@ export const getAIProjectById = async (projectId: string) => {
     const found = projects.find((p) => p.id === projectId);
     if (found) return found;
   }
-
   return null;
 };
 
 // =========================
-// ✏️ UPDATE PROJECT
+// ✏️ UPDATE PROJECT (FIXED)
 // =========================
 export const updateAIProject = async (
   projectId: string,
@@ -68,6 +80,7 @@ export const updateAIProject = async (
       const updatedProject: AIProject = {
         ...projects[index],
         ...data,
+        updatedAt: new Date().toISOString(), // ✅ FIX
       };
 
       const updatedProjects = [...projects];
@@ -92,6 +105,7 @@ export const deleteAIProject = async (projectId: string) => {
     if (index !== -1) {
       const updated = projects.filter((p) => p.id !== projectId);
       inMemoryProjects.set(subaccountId, updated);
+
       console.log(`🗑️ Deleted project ${projectId}`);
       return true;
     }
