@@ -1,18 +1,25 @@
-// src/components/modules/ai-builder/state/ai-builder.store.ts (FINAL - full production store)
 "use client";
 
 import { create } from "zustand";
 import { AIFileNode } from "@/lib/ai/types/ai-project.types";
 
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 interface AIBuilderState {
   projectId: string | null;
   files: AIFileNode[];
   activeFilePath: string | null;
+  messages: Message[];
 
   setProject: (id: string) => void;
   setFiles: (files: AIFileNode[]) => void;
   setActiveFile: (path: string) => void;
   updateFile: (path: string, content: string) => void;
+
+  addMessage: (msg: Message) => void;
   reset: () => void;
 }
 
@@ -20,6 +27,7 @@ export const useAIBuilderStore = create<AIBuilderState>((set, get) => ({
   projectId: null,
   files: [],
   activeFilePath: null,
+  messages: [],
 
   setProject: (id) =>
     set({
@@ -47,10 +55,16 @@ export const useAIBuilderStore = create<AIBuilderState>((set, get) => ({
     set({ files: updated });
   },
 
+  addMessage: (msg) =>
+    set((state) => ({
+      messages: [...state.messages, msg],
+    })),
+
   reset: () =>
     set({
       projectId: null,
       files: [],
       activeFilePath: null,
+      messages: [],
     }),
 }));

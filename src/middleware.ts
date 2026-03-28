@@ -5,9 +5,15 @@ export default clerkMiddleware((auth, req) => {
   const url = req.nextUrl;
   const hostname = req.headers.get("host") || "";
 
+  const res = NextResponse.next();
+
+  // 🔥 REQUIRED FOR WEB CONTAINER
+  res.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  res.headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+
   // Allow main localhost app
   if (hostname === "localhost:3000") {
-    return NextResponse.next();
+    return res;
   }
 
   // Ignore static files
@@ -19,21 +25,21 @@ export default clerkMiddleware((auth, req) => {
     url.pathname.startsWith("/icons") ||
     url.pathname.includes(".")
   ) {
-    return NextResponse.next();
+    return res;
   }
 
   const subdomain = hostname.split(".")[0];
 
   if (subdomain && subdomain !== "localhost") {
     url.pathname = `/${subdomain}${url.pathname}`;
-    return NextResponse.rewrite(url);
+    return NextResponse.rewrite(url, {
+      headers: res.headers,
+    });
   }
 
-  return NextResponse.next();
+  return res;
 });
 
 export const config = {
-  matcher: [
-    "/((?!_next|.*\\..*).*)",
-  ],
+  matcher: ["/((?!_next|.*\\..*).*)"],
 };

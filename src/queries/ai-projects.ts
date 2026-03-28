@@ -1,34 +1,101 @@
-// src/queries/ai-projects.ts
 "use server";
+
+// src/queries/ai-projects.ts
 
 import { AIProject } from "@/lib/ai/types/ai-project.types";
 
-const inMemoryProjects = new Map<string, AIProject[]>();
+// =========================
+// 🔥 GLOBAL STORE (survives Next.js HMR reloads)
+// =========================
+const g = global as typeof global & {
+  _aiProjectsBySubaccount?: Map<string, AIProject[]>;
+};
 
+if (!g._aiProjectsBySubaccount) {
+  g._aiProjectsBySubaccount = new Map<string, AIProject[]>();
+}
+
+const inMemoryProjects = g._aiProjectsBySubaccount;
+
+// =========================
+// 📦 GET ALL PROJECTS
+// =========================
 export const getAIProjects = async (subaccountId: string) => {
   return inMemoryProjects.get(subaccountId) || [];
 };
 
-export const createAIProject = async (
-  project: AIProject
-) => {
-  const existing =
-    inMemoryProjects.get(project.subaccountId) || [];
+// =========================
+// ➕ CREATE PROJECT
+// =========================
+export const createAIProject = async (project: AIProject) => {
+  const existing = inMemoryProjects.get(project.subaccountId) || [];
 
-  inMemoryProjects.set(project.subaccountId, [
-    ...existing,
-    project,
-  ]);
+  // Avoid duplicates — overwrite if same id already stored
+  const withoutDuplicate = existing.filter((p) => p.id !== project.id);
+
+  inMemoryProjects.set(project.subaccountId, [...withoutDuplicate, project]);
+
+  console.log(
+    `✅ Project ${project.id} stored under subaccount ${project.subaccountId}`
+  );
 
   return project;
 };
 
-export const getAIProjectById = async (
-  subaccountId: string,
-  projectId: string
-) => {
-  const projects =
-    inMemoryProjects.get(subaccountId) || [];
+// =========================
+// 🔍 GET PROJECT BY ID
+// =========================
+export const getAIProjectById = async (projectId: string) => {
+  for (const [, projects] of inMemoryProjects.entries()) {
+    const found = projects.find((p) => p.id === projectId);
+    if (found) return found;
+  }
 
-  return projects.find((p) => p.id === projectId) || null;
+  return null;
+};
+
+// =========================
+// ✏️ UPDATE PROJECT
+// =========================
+export const updateAIProject = async (
+  projectId: string,
+  data: Partial<AIProject>
+) => {
+  for (const [subaccountId, projects] of inMemoryProjects.entries()) {
+    const index = projects.findIndex((p) => p.id === projectId);
+
+    if (index !== -1) {
+      const updatedProject: AIProject = {
+        ...projects[index],
+        ...data,
+      };
+
+      const updatedProjects = [...projects];
+      updatedProjects[index] = updatedProject;
+
+      inMemoryProjects.set(subaccountId, updatedProjects);
+
+      return updatedProject;
+    }
+  }
+
+  return null;
+};
+
+// =========================
+// ❌ DELETE PROJECT
+// =========================
+export const deleteAIProject = async (projectId: string) => {
+  for (const [subaccountId, projects] of inMemoryProjects.entries()) {
+    const index = projects.findIndex((p) => p.id === projectId);
+
+    if (index !== -1) {
+      const updated = projects.filter((p) => p.id !== projectId);
+      inMemoryProjects.set(subaccountId, updated);
+      console.log(`🗑️ Deleted project ${projectId}`);
+      return true;
+    }
+  }
+
+  return false;
 };
