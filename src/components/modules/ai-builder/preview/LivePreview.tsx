@@ -1,5 +1,7 @@
 "use client";
 
+// src/components/modules/ai-builder/preview/LivePreview.tsx
+
 import { useEffect, useRef, memo } from "react";
 import { Loader2, Monitor, AlertCircle, RefreshCw } from "lucide-react";
 import { useAIBuilderStore } from "../state/ai-builder.store";
@@ -7,72 +9,60 @@ import { useWebContainer } from "../state/use-webcontainer";
 
 type AIFile = { path: string; content: string };
 
-// ─────────────────────────────────────────────────────────────
-// STATUS BADGE
-// ─────────────────────────────────────────────────────────────
 const StatusBadge = ({ status }: { status: string }) => {
   const isRunning = status === "running";
   const isError = status === "error" || status === "install-failed";
-  const isLoading = !isRunning && !isError && status !== "idle";
+  const isLoading = !isRunning && !isError && status !== "idle" && status !== "waiting";
 
   return (
     <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      {isRunning && (
-        <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
-      )}
-      {isLoading && (
-        <Loader2 className="h-3 w-3 animate-spin text-yellow-500" />
-      )}
-      {isError && (
-        <AlertCircle className="h-3 w-3 text-red-500" />
-      )}
+      {isRunning && <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />}
+      {isLoading && <Loader2 className="h-3 w-3 animate-spin text-yellow-500" />}
+      {isError && <AlertCircle className="h-3 w-3 text-red-500" />}
       {status}
     </span>
   );
 };
 
-// ─────────────────────────────────────────────────────────────
-// LIVE PREVIEW
-// ─────────────────────────────────────────────────────────────
 const LivePreview = memo(() => {
   const { files } = useAIBuilderStore();
   const { mountAndRun, writeFiles, remount, url, status } = useWebContainer();
 
-  // Track boot state and previous files for diffing
   const isBootedRef = useRef(false);
-  const prevFilesRef = useRef<AIFile[]>([]);
   const prevFilesMapRef = useRef<Map<string, string>>(new Map());
 
   useEffect(() => {
     if (!files.length) return;
 
-    // ── First load: boot WebContainer with all files ──
+    // ✅ FIX: don't boot until package.json is present
+    // The planner generates it early but parallel workers may deliver it late.
+    // Attempting npm install without it causes exit code -17 (ENOENT).
+    const hasPackageJson = files.some((f) => f.path === "package.json");
+    if (!hasPackageJson) {
+      console.log("⏳ [LivePreview] Waiting for package.json...");
+      return;
+    }
+
+    // ── First boot ──────────────────────────────────────────
     if (!isBootedRef.current) {
       isBootedRef.current = true;
-      prevFilesRef.current = files;
       prevFilesMapRef.current = new Map(files.map((f) => [f.path, f.content]));
       mountAndRun(files);
       return;
     }
 
-    // ── Subsequent updates: diff and patch only changed files ──
+    // ── Diff and patch ──────────────────────────────────────
     const changed: AIFile[] = [];
     const newMap = new Map(files.map((f) => [f.path, f.content]));
 
     for (const file of files) {
       const prev = prevFilesMapRef.current.get(file.path);
-      if (prev !== file.content) {
-        changed.push(file);
-      }
+      if (prev !== file.content) changed.push(file);
     }
-
-    // Check for deleted files (path in prev but not in new)
-    // WebContainers doesn't support delete easily — we skip this edge case
-    // and rely on the file content changing to trigger HMR
 
     if (changed.length === 0) return;
 
-    // If it's a structural change (package.json, vite.config) — full remount
+    // Structural change → full remount
     const needsRemount = changed.some(
       (f) =>
         f.path === "package.json" ||
@@ -89,24 +79,19 @@ const LivePreview = memo(() => {
       writeFiles(changed);
     }
 
-    // Update refs
-    prevFilesRef.current = files;
     prevFilesMapRef.current = newMap;
   }, [files, mountAndRun, writeFiles, remount]);
 
-  // ── Manual refresh ──
   const handleRefresh = () => {
     if (!files.length) return;
     console.log("🔄 Manual remount triggered");
     isBootedRef.current = false;
-    prevFilesRef.current = [];
     prevFilesMapRef.current = new Map();
     remount(files);
   };
 
   return (
     <div className="h-full flex flex-col bg-background">
-      {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
         <div className="flex items-center gap-2">
           <Monitor className="h-3.5 w-3.5 text-muted-foreground" />
@@ -125,14 +110,12 @@ const LivePreview = memo(() => {
         </div>
       </div>
 
-      {/* Preview area */}
       <div className="flex-1 relative overflow-hidden">
         {url ? (
           <iframe
             src={url}
             className="absolute inset-0 w-full h-full border-0 bg-white"
             title="Live preview"
-            // allow is required for some WebContainer features
             allow="cross-origin-isolated"
           />
         ) : (
@@ -146,15 +129,13 @@ const LivePreview = memo(() => {
 LivePreview.displayName = "LivePreview";
 export default LivePreview;
 
-// ─────────────────────────────────────────────────────────────
-// PLACEHOLDER while container boots
-// ─────────────────────────────────────────────────────────────
 const STAGE_MESSAGES: Record<string, string> = {
   idle:             "Generate a project to see the preview",
+  waiting:          "Waiting for package.json to arrive...",
   booting:          "Booting WebContainer...",
   mounting:         "Mounting project files...",
-  installing:       "Installing dependencies (this takes ~30s the first time)...",
-  "install-failed": "Dependency installation failed",
+  installing:       "Installing dependencies (first run ~30s)...",
+  "install-failed": "Dependency installation failed — check console",
   starting:         "Starting Vite dev server...",
   remounting:       "Remounting project...",
   error:            "Something went wrong — try refreshing",

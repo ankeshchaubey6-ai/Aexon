@@ -1,34 +1,59 @@
 "use client";
 
-import { useState, useCallback } from "react";
+// src/components/modules/ai-builder/state/use-webcontainer.ts
+
+import { useState, useCallback, useEffect } from "react";
 import { WebContainer } from "@webcontainer/api";
 import type { FileSystemTree } from "@webcontainer/api";
 
 type AIFile = { path: string; content: string };
 
+type WCStatus =
+  | "idle"
+  | "waiting-files"
+  | "booting"
+  | "mounting"
+  | "installing"
+  | "install-failed"
+  | "starting"
+  | "remounting"
+  | "running"
+  | "error";
+
 // ─────────────────────────────────────────────────────────────
-// MODULE-LEVEL SINGLETONS
-// Stored outside React so they survive HMR reloads and
-// re-renders. A new component mount NEVER re-boots the container.
+// GLOBAL SINGLETON STATE
+// All hook instances share the same state and listeners.
 // ─────────────────────────────────────────────────────────────
 let _instance: WebContainer | null = null;
 let _bootPromise: Promise<WebContainer> | null = null;
+let _globalStatus: WCStatus = "idle";
+let _globalUrl: string | null = null;
+let _devProcess: Awaited<ReturnType<WebContainer["spawn"]>> | null = null;
+let _installed = false;
+let _busy = false; // prevent concurrent mountAndRun calls
 
-// Track container lifecycle flags together so they're always in sync
-const _state = {
-  mounted: false,     // files have been mounted
-  installed: false,   // npm install completed
-  running: false,     // dev server is up
-  devProcess: null as Awaited<ReturnType<WebContainer["spawn"]>> | null,
-};
+// Listeners — every hook instance subscribes here
+const _listeners = new Set<() => void>();
+
+function _notify() {
+  _listeners.forEach((fn) => fn());
+}
+
+function _setStatus(s: WCStatus) {
+  _globalStatus = s;
+  _notify();
+}
+
+function _setUrl(u: string | null) {
+  _globalUrl = u;
+  _notify();
+}
 
 // ─────────────────────────────────────────────────────────────
-// BOOT — idempotent, only ever runs once per page load
+// BOOT
 // ─────────────────────────────────────────────────────────────
 async function bootOnce(): Promise<WebContainer> {
   if (_instance) return _instance;
-
-  // If a boot is already in progress, wait for it
   if (_bootPromise) return _bootPromise;
 
   _bootPromise = WebContainer.boot().then((wc) => {
@@ -40,7 +65,7 @@ async function bootOnce(): Promise<WebContainer> {
 }
 
 // ─────────────────────────────────────────────────────────────
-// FILE TREE — converts flat file list to WebContainer fs tree
+// FILE TREE BUILDER
 // ─────────────────────────────────────────────────────────────
 function buildFileTree(files: AIFile[]): FileSystemTree {
   const tree: FileSystemTree = {};
@@ -51,15 +76,9 @@ function buildFileTree(files: AIFile[]): FileSystemTree {
 
     parts.forEach((part, index) => {
       if (index === parts.length - 1) {
-        current[part] = {
-          file: {
-            contents: file.content,
-          },
-        };
+        current[part] = { file: { contents: file.content } };
       } else {
-        if (!current[part]) {
-          current[part] = { directory: {} };
-        }
+        if (!current[part]) current[part] = { directory: {} };
         current = current[part].directory;
       }
     });
@@ -69,183 +88,156 @@ function buildFileTree(files: AIFile[]): FileSystemTree {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HOOK
+// REQUIRED FILE CHECK
 // ─────────────────────────────────────────────────────────────
-export const useWebContainer = () => {
-  const [status, setStatus] = useState<string>("idle");
-  const [url, setUrl] = useState<string | null>(null);
+function hasRequiredFiles(files: AIFile[]): boolean {
+  return (
+    files.some((f) => f.path === "package.json") &&
+    files.some((f) => f.path === "src/main.jsx") &&
+    files.some((f) => f.path === "src/App.jsx")
+  );
+}
 
-  // ── mountAndRun ──────────────────────────────────────────
-  // Called once when the first complete set of files arrives.
-  // Boots container → mounts files → npm install → npm run dev.
-  const mountAndRun = useCallback(async (files: AIFile[]) => {
-    if (_state.running) {
-      // Container already running — just patch changed files
-      await writeFiles(files);
-      return;
+// ─────────────────────────────────────────────────────────────
+// WAIT FOR FILE IN FS
+// ─────────────────────────────────────────────────────────────
+async function waitForFile(path: string) {
+  if (!_instance) return;
+  while (true) {
+    try {
+      await _instance.fs.readFile(path);
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// CORE LOGIC (module-level, not inside hook)
+// ─────────────────────────────────────────────────────────────
+async function _doMountAndRun(files: AIFile[], isRemount = false) {
+  if (_busy) {
+    console.warn("[WebContainer] Already busy, skipping duplicate call");
+    return;
+  }
+
+  if (!hasRequiredFiles(files)) {
+    _setStatus("waiting-files");
+    return;
+  }
+
+  _busy = true;
+
+  try {
+    _setStatus(isRemount ? "remounting" : "booting");
+    _setUrl(null);
+
+    if (_devProcess) {
+      try { _devProcess.kill(); } catch {}
+      _devProcess = null;
     }
 
-    try {
-      setStatus("booting");
-      const wc = await bootOnce();
+    const wc = await bootOnce();
 
-      // ── Mount ──
-      setStatus("mounting");
-      await wc.mount(buildFileTree(files));
-      _state.mounted = true;
+    // Remove old server-ready listeners to avoid duplicates
+    // (WebContainer doesn't expose removeListener, so we track via flag)
+    _setStatus("mounting");
+    await wc.mount(buildFileTree(files));
 
-      // ── Install ──
-      // Only install if we haven't yet (survives re-renders, not page reload)
-      if (!_state.installed) {
-        setStatus("installing");
+    await waitForFile("src/App.jsx");
+    await waitForFile("src/main.jsx");
 
-        const install = await wc.spawn("npm", ["install"]);
+    // Always reinstall on remount (new package.json may differ)
+    if (!_installed || isRemount) {
+      _setStatus("installing");
 
-        // Stream install output for debugging
-        install.output.pipeTo(
-          new WritableStream({
-            write(chunk) {
-              // Uncomment for verbose install logs:
-              // console.log("[npm install]", chunk);
-            },
-          })
-        );
-
-        const exitCode = await install.exit;
-
-        if (exitCode !== 0) {
-          setStatus("install-failed");
-          console.error("npm install failed with exit code", exitCode);
-          return;
-        }
-
-        _state.installed = true;
-      }
-
-      // ── Dev server ──
-      setStatus("starting");
-
-      // Kill any previous dev process (e.g. after a full remount)
-      if (_state.devProcess) {
-        try { _state.devProcess.kill(); } catch (_) {}
-        _state.devProcess = null;
-      }
-
-      const dev = await wc.spawn("npm", ["run", "dev"]);
-      _state.devProcess = dev;
-
-      dev.output.pipeTo(
-        new WritableStream({
-          write(chunk) {
-            // Uncomment for verbose dev server logs:
-            // console.log("[dev]", chunk);
-          },
-        })
+      const install = await wc.spawn("npm", ["install"]);
+      install.output.pipeTo(
+        new WritableStream({ write(chunk) { console.log("[npm install]", chunk); } })
       );
 
-      // ── Server ready ──
-      wc.on("server-ready", (_port, serverUrl) => {
-        _state.running = true;
-        setUrl(serverUrl);
-        setStatus("running");
-        console.log("✅ Preview ready:", serverUrl);
-      });
+      const exit = await install.exit;
+      if (exit !== 0) {
+        _setStatus("install-failed");
+        _busy = false;
+        return;
+      }
 
-    } catch (err) {
-      console.error("WebContainer error:", err);
-      _state.running = false;
-      setStatus("error");
-    }
-  }, []);
-
-  // ── writeFiles ───────────────────────────────────────────
-  // Writes changed files directly into the running container.
-  // Vite HMR detects the changes and updates the preview instantly.
-  // Only touches files that actually changed — never triggers a reload.
-  const writeFiles = useCallback(async (files: AIFile[]) => {
-    if (!_instance) {
-      console.warn("writeFiles called before container is ready");
-      return;
+      _installed = true;
     }
 
-    const results = await Promise.allSettled(
-      files.map(async (file) => {
-        const normalizedPath = file.path.replace(/^\//, "");
-        const parts = normalizedPath.split("/");
+    _setStatus("starting");
 
-        // Ensure parent directories exist
-        if (parts.length > 1) {
-          const dir = parts.slice(0, -1).join("/");
-          await _instance!.fs.mkdir(dir, { recursive: true });
-        }
+    const dev = await wc.spawn("npm", ["run", "dev"]);
+    _devProcess = dev;
 
-        await _instance!.fs.writeFile(normalizedPath, file.content);
-      })
+    dev.output.pipeTo(
+      new WritableStream({ write(chunk) { console.log("[vite]", chunk); } })
     );
 
-    const failed = results.filter((r) => r.status === "rejected");
-    if (failed.length > 0) {
-      console.warn(
-        `⚠️ ${failed.length}/${files.length} file writes failed`,
-        failed
-      );
-    } else {
-      console.log(`⚡ Patched ${files.length} file(s)`);
+    // Use a one-time listener flag so server-ready only fires once per boot
+    let resolved = false;
+    wc.on("server-ready", (_port, serverUrl) => {
+      if (resolved) return;
+      resolved = true;
+      _setUrl(serverUrl);
+      _setStatus("running");
+      _busy = false;
+    });
+
+  } catch (err) {
+    console.error("[WebContainer]", err);
+    _setStatus("error");
+    _busy = false;
+  }
+}
+
+async function _doWriteFiles(files: AIFile[]) {
+  if (!_instance) return;
+
+  for (const file of files) {
+    const path = file.path.replace(/^\//, "");
+    const parts = path.split("/");
+
+    if (parts.length > 1) {
+      await _instance.fs.mkdir(parts.slice(0, -1).join("/"), { recursive: true });
     }
+
+    await _instance.fs.writeFile(path, file.content);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HOOK — just subscribes to global state
+// ─────────────────────────────────────────────────────────────
+export const useWebContainer = () => {
+  // Force re-render when global state changes
+  const [, rerender] = useState(0);
+
+  useEffect(() => {
+    const listener = () => rerender((n) => n + 1);
+    _listeners.add(listener);
+    return () => { _listeners.delete(listener); };
   }, []);
 
-  // ── remount ──────────────────────────────────────────────
-  // Full remount: used when the user generates a completely new project.
-  // Kills the dev server, clears state flags, remounts fresh files.
+  const mountAndRun = useCallback(async (files: AIFile[]) => {
+    await _doMountAndRun(files, false);
+  }, []);
+
   const remount = useCallback(async (files: AIFile[]) => {
-    if (!_instance) {
-      // Container not booted yet — just do a normal mountAndRun
-      await mountAndRun(files);
-      return;
-    }
+    _installed = false; // force reinstall on remount
+    await _doMountAndRun(files, true);
+  }, []);
 
-    try {
-      setStatus("remounting");
-      setUrl(null);
-
-      // Kill dev server
-      if (_state.devProcess) {
-        try { _state.devProcess.kill(); } catch (_) {}
-        _state.devProcess = null;
-      }
-
-      // Reset flags (keep installed=true — node_modules still exist)
-      _state.mounted = false;
-      _state.running = false;
-
-      // Remount files
-      setStatus("mounting");
-      await _instance.mount(buildFileTree(files));
-      _state.mounted = true;
-
-      // Restart dev server
-      setStatus("starting");
-      const dev = await _instance.spawn("npm", ["run", "dev"]);
-      _state.devProcess = dev;
-
-      dev.output.pipeTo(new WritableStream({ write() {} }));
-
-      _instance.on("server-ready", (_port, serverUrl) => {
-        _state.running = true;
-        setUrl(serverUrl);
-        setStatus("running");
-      });
-
-    } catch (err) {
-      console.error("Remount error:", err);
-      setStatus("error");
-    }
-  }, [mountAndRun]);
+  const writeFiles = useCallback(async (files: AIFile[]) => {
+    await _doWriteFiles(files);
+  }, []);
 
   return {
-    status,
-    url,
-    isRunning: _state.running,
+    status: _globalStatus,
+    url: _globalUrl,
+    isRunning: _globalStatus === "running",
     mountAndRun,
     writeFiles,
     remount,

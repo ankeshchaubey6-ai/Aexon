@@ -1,0 +1,724 @@
+
+
+===== FILE: src/components/modules/ai-builder/state/use-webcontainer.ts =====
+
+"use client";
+
+// src/components/modules/ai-builder/state/use-webcontainer.ts
+
+import { useState, useCallback } from "react";
+import { WebContainer } from "@webcontainer/api";
+import type { FileSystemTree } from "@webcontainer/api";
+
+type AIFile = { path: string; content: string };
+
+// ─────────────────────────────────────────────────────────────
+// SINGLETONS
+// ─────────────────────────────────────────────────────────────
+let _instance: WebContainer | null = null;
+let _bootPromise: Promise<WebContainer> | null = null;
+
+const _state = {
+  mounted: false,
+  installed: false,
+  running: false,
+  devProcess: null as Awaited<ReturnType<WebContainer["spawn"]>> | null,
+};
+
+// ─────────────────────────────────────────────────────────────
+// BOOT
+// ─────────────────────────────────────────────────────────────
+async function bootOnce(): Promise<WebContainer> {
+  if (_instance) return _instance;
+  if (_bootPromise) return _bootPromise;
+
+  _bootPromise = WebContainer.boot().then((wc) => {
+    _instance = wc;
+    return wc;
+  });
+
+  return _bootPromise;
+}
+
+// ─────────────────────────────────────────────────────────────
+// FILE TREE BUILDER
+// ─────────────────────────────────────────────────────────────
+function buildFileTree(files: AIFile[]): FileSystemTree {
+  const tree: FileSystemTree = {};
+
+  for (const file of files) {
+    const parts = file.path.replace(/^\//, "").split("/");
+    let current: any = tree;
+
+    parts.forEach((part, index) => {
+      if (index === parts.length - 1) {
+        current[part] = { file: { contents: file.content } };
+      } else {
+        if (!current[part]) current[part] = { directory: {} };
+        current = current[part].directory;
+      }
+    });
+  }
+
+  return tree;
+}
+
+// ─────────────────────────────────────────────────────────────
+// REQUIRED FILE CHECK
+// ─────────────────────────────────────────────────────────────
+function hasRequiredFiles(files: AIFile[]): boolean {
+  return (
+    files.some((f) => f.path === "package.json") &&
+    files.some((f) => f.path === "src/main.jsx") &&
+    files.some((f) => f.path === "src/App.jsx")
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// SAFE FILE EXISTENCE CHECK
+// ─────────────────────────────────────────────────────────────
+async function waitForFile(path: string) {
+  if (!_instance) return;
+
+  while (true) {
+    try {
+      await _instance.fs.readFile(path);
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HOOK
+// ─────────────────────────────────────────────────────────────
+export const useWebContainer = () => {
+  const [status, setStatus] = useState<string>("idle");
+  const [url, setUrl] = useState<string | null>(null);
+
+  // ─────────────────────────────────────────────────────────
+  // INITIAL RUN
+  // ─────────────────────────────────────────────────────────
+  const mountAndRun = useCallback(async (files: AIFile[]) => {
+    if (!hasRequiredFiles(files)) {
+      setStatus("waiting-files");
+      return;
+    }
+
+    try {
+      setStatus("booting");
+      const wc = await bootOnce();
+
+      if (_state.devProcess) {
+        try { _state.devProcess.kill(); } catch {}
+        _state.devProcess = null;
+      }
+
+      setStatus("mounting");
+      await wc.mount(buildFileTree(files));
+      _state.mounted = true;
+
+      await waitForFile("src/App.jsx");
+      await waitForFile("src/main.jsx");
+
+      if (!_state.installed) {
+        setStatus("installing");
+
+        const install = await wc.spawn("npm", ["install"]);
+
+        install.output.pipeTo(
+          new WritableStream({
+            write(chunk) {
+              console.log("[npm install]", chunk);
+            },
+          })
+        );
+
+        const exit = await install.exit;
+        if (exit !== 0) {
+          setStatus("install-failed");
+          return;
+        }
+
+        _state.installed = true;
+      }
+
+      setStatus("starting");
+
+      const dev = await wc.spawn("npm", ["run", "dev"]);
+      _state.devProcess = dev;
+
+      dev.output.pipeTo(
+        new WritableStream({
+          write(chunk) {
+            console.log("[vite]", chunk);
+          },
+        })
+      );
+
+      wc.on("server-ready", (_port, serverUrl) => {
+        _state.running = true;
+        setUrl(serverUrl);
+        setStatus("running");
+      });
+
+    } catch (err) {
+      console.error(err);
+      setStatus("error");
+    }
+  }, []);
+
+  // ─────────────────────────────────────────────────────────
+  // PATCH FILES
+  // ─────────────────────────────────────────────────────────
+  const writeFiles = useCallback(async (files: AIFile[]) => {
+    if (!_instance) return;
+
+    for (const file of files) {
+      const path = file.path.replace(/^\//, "");
+      const parts = path.split("/");
+
+      if (parts.length > 1) {
+        await _instance.fs.mkdir(parts.slice(0, -1).join("/"), { recursive: true });
+      }
+
+      await _instance.fs.writeFile(path, file.content);
+    }
+  }, []);
+
+  // ─────────────────────────────────────────────────────────
+  // REMOUNT
+  // ─────────────────────────────────────────────────────────
+  const remount = useCallback(async (files: AIFile[]) => {
+    if (!_instance) {
+      await mountAndRun(files);
+      return;
+    }
+
+    try {
+      setStatus("remounting");
+      setUrl(null);
+
+      if (_state.devProcess) {
+        try { _state.devProcess.kill(); } catch {}
+        _state.devProcess = null;
+      }
+
+      _state.running = false;
+      _state.installed = false;
+
+      const wc = await bootOnce();
+
+      setStatus("mounting");
+      await wc.mount(buildFileTree(files));
+
+      await waitForFile("src/App.jsx");
+      await waitForFile("src/main.jsx");
+
+      setStatus("installing");
+
+      const install = await wc.spawn("npm", ["install"]);
+
+      install.output.pipeTo(
+        new WritableStream({
+          write(chunk) {
+            console.log("[npm install remount]", chunk);
+          },
+        })
+      );
+
+      const exit = await install.exit;
+      if (exit !== 0) {
+        setStatus("install-failed");
+        return;
+      }
+
+      _state.installed = true;
+
+      setStatus("starting");
+
+      const dev = await wc.spawn("npm", ["run", "dev"]);
+      _state.devProcess = dev;
+
+      dev.output.pipeTo(
+        new WritableStream({
+          write(chunk) {
+            console.log("[vite remount]", chunk);
+          },
+        })
+      );
+
+      wc.on("server-ready", (_port, serverUrl) => {
+        _state.running = true;
+        setUrl(serverUrl);
+        setStatus("running");
+      });
+
+    } catch (err) {
+      console.error(err);
+      setStatus("error");
+    }
+  }, [mountAndRun]);
+
+  return {
+    status,
+    url,
+    isRunning: _state.running,
+    mountAndRun,
+    writeFiles,
+    remount,
+  };
+};
+
+
+===== FILE: src/components/modules/ai-builder/preview/LivePreview.tsx =====
+
+"use client";
+
+// src/components/modules/ai-builder/preview/LivePreview.tsx
+
+import { useEffect, useRef, memo } from "react";
+import { Loader2, Monitor, AlertCircle, RefreshCw } from "lucide-react";
+import { useAIBuilderStore } from "../state/ai-builder.store";
+import { useWebContainer } from "../state/use-webcontainer";
+
+type AIFile = { path: string; content: string };
+
+const StatusBadge = ({ status }: { status: string }) => {
+  const isRunning = status === "running";
+  const isError = status === "error" || status === "install-failed";
+  const isLoading = !isRunning && !isError && status !== "idle" && status !== "waiting";
+
+  return (
+    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      {isRunning && <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />}
+      {isLoading && <Loader2 className="h-3 w-3 animate-spin text-yellow-500" />}
+      {isError && <AlertCircle className="h-3 w-3 text-red-500" />}
+      {status}
+    </span>
+  );
+};
+
+const LivePreview = memo(() => {
+  const { files } = useAIBuilderStore();
+  const { mountAndRun, writeFiles, remount, url, status } = useWebContainer();
+
+  const isBootedRef = useRef(false);
+  const prevFilesMapRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    if (!files.length) return;
+
+    // ✅ FIX: don't boot until package.json is present
+    // The planner generates it early but parallel workers may deliver it late.
+    // Attempting npm install without it causes exit code -17 (ENOENT).
+    const hasPackageJson = files.some((f) => f.path === "package.json");
+    if (!hasPackageJson) {
+      console.log("⏳ [LivePreview] Waiting for package.json...");
+      return;
+    }
+
+    // ── First boot ──────────────────────────────────────────
+    if (!isBootedRef.current) {
+      isBootedRef.current = true;
+      prevFilesMapRef.current = new Map(files.map((f) => [f.path, f.content]));
+      mountAndRun(files);
+      return;
+    }
+
+    // ── Diff and patch ──────────────────────────────────────
+    const changed: AIFile[] = [];
+    const newMap = new Map(files.map((f) => [f.path, f.content]));
+
+    for (const file of files) {
+      const prev = prevFilesMapRef.current.get(file.path);
+      if (prev !== file.content) changed.push(file);
+    }
+
+    if (changed.length === 0) return;
+
+    // Structural change → full remount
+    const needsRemount = changed.some(
+      (f) =>
+        f.path === "package.json" ||
+        f.path === "vite.config.js" ||
+        f.path === "vite.config.ts" ||
+        f.path === "index.html"
+    );
+
+    if (needsRemount) {
+      console.log("🔄 Structural change detected — remounting");
+      remount(files);
+    } else {
+      console.log(`⚡ Patching ${changed.length} file(s):`, changed.map((f) => f.path));
+      writeFiles(changed);
+    }
+
+    prevFilesMapRef.current = newMap;
+  }, [files, mountAndRun, writeFiles, remount]);
+
+  const handleRefresh = () => {
+    if (!files.length) return;
+    console.log("🔄 Manual remount triggered");
+    isBootedRef.current = false;
+    prevFilesMapRef.current = new Map();
+    remount(files);
+  };
+
+  return (
+    <div className="h-full flex flex-col bg-background">
+      <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
+        <div className="flex items-center gap-2">
+          <Monitor className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="text-xs font-medium">Preview</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <StatusBadge status={status} />
+          <button
+            onClick={handleRefresh}
+            disabled={!files.length}
+            title="Force remount"
+            className="p-1 rounded hover:bg-muted transition-colors disabled:opacity-40"
+          >
+            <RefreshCw className="h-3 w-3 text-muted-foreground" />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 relative overflow-hidden">
+        {url ? (
+          <iframe
+            src={url}
+            className="absolute inset-0 w-full h-full border-0 bg-white"
+            title="Live preview"
+            allow="cross-origin-isolated"
+          />
+        ) : (
+          <PreviewPlaceholder status={status} />
+        )}
+      </div>
+    </div>
+  );
+});
+
+LivePreview.displayName = "LivePreview";
+export default LivePreview;
+
+const STAGE_MESSAGES: Record<string, string> = {
+  idle:             "Generate a project to see the preview",
+  waiting:          "Waiting for package.json to arrive...",
+  booting:          "Booting WebContainer...",
+  mounting:         "Mounting project files...",
+  installing:       "Installing dependencies (first run ~30s)...",
+  "install-failed": "Dependency installation failed — check console",
+  starting:         "Starting Vite dev server...",
+  remounting:       "Remounting project...",
+  error:            "Something went wrong — try refreshing",
+};
+
+function PreviewPlaceholder({ status }: { status: string }) {
+  const message = STAGE_MESSAGES[status] ?? status;
+  const isError = status === "error" || status === "install-failed";
+
+  return (
+    <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-center px-6">
+      {isError ? (
+        <AlertCircle className="h-8 w-8 text-red-400" />
+      ) : status === "idle" ? (
+        <Monitor className="h-8 w-8 text-muted-foreground/40" />
+      ) : (
+        <Loader2 className="h-8 w-8 animate-spin text-primary/60" />
+      )}
+      <p className="text-sm text-muted-foreground max-w-xs">{message}</p>
+      {status === "installing" && (
+        <p className="text-xs text-muted-foreground/60">
+          Dependencies are cached after the first run
+        </p>
+      )}
+    </div>
+  );
+}
+
+
+===== FILE: src/components/modules/ai-builder/preview/PreviewPanel.tsx =====
+
+
+
+===== FILE: src/components/modules/ai-builder/state/ai-builder.store.ts =====
+
+"use client";
+
+import { create } from "zustand";
+import { AIFileNode } from "@/lib/ai/types/ai-project.types";
+
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+interface AIBuilderState {
+  projectId: string | null;
+  files: AIFileNode[];
+  activeFilePath: string | null;
+  messages: Message[];
+
+  setProject: (id: string) => void;
+  setFiles: (files: AIFileNode[]) => void;
+  setActiveFile: (path: string) => void;
+  updateFile: (path: string, content: string) => void;
+
+  addMessage: (msg: Message) => void;
+  reset: () => void;
+}
+
+export const useAIBuilderStore = create<AIBuilderState>((set, get) => ({
+  projectId: null,
+  files: [],
+  activeFilePath: null,
+  messages: [],
+
+  setProject: (id) =>
+    set({
+      projectId: id,
+    }),
+
+  setFiles: (files) =>
+    set({
+      files,
+      activeFilePath: files.length ? files[0].path : null,
+    }),
+
+  setActiveFile: (path) =>
+    set({
+      activeFilePath: path,
+    }),
+
+  updateFile: (path, content) => {
+    const { files } = get();
+
+    const updated = files.map((file) =>
+      file.path === path ? { ...file, content } : file
+    );
+
+    set({ files: updated });
+  },
+
+  addMessage: (msg) =>
+    set((state) => ({
+      messages: [...state.messages, msg],
+    })),
+
+  reset: () =>
+    set({
+      projectId: null,
+      files: [],
+      activeFilePath: null,
+      messages: [],
+    }),
+}));
+
+
+===== FILE: src/components/modules/ai-builder/layout/AIWorkspace.tsx =====
+
+"use client";
+
+// src/components/modules/ai-builder/layout/AIWorkspace.tsx
+
+import { useEffect, useRef } from "react";
+import { useParams } from "next/navigation";
+import { Loader2 } from "lucide-react";
+
+import ProjectSidebar from "../chat/ProjectSidebar";
+import ChatPanel from "../chat/ChatPanel";
+import LivePreview from "../preview/LivePreview";
+import { useAIBuilderStore } from "../state/ai-builder.store";
+import { useWebContainer } from "../state/use-webcontainer";
+
+const AIWorkspace = () => {
+  const params = useParams();
+  const subaccountId = params?.subaccountId as string;
+  const projectId = params?.projectId as string;
+
+  const { setProject, setFiles, files, projectId: storeProjectId } = useAIBuilderStore();
+  const { mountAndRun, isRunning } = useWebContainer();
+  const loadedRef = useRef<string | null>(null);
+
+  // ── When navigating to a project, load its files from DB into the store ──
+  useEffect(() => {
+    if (!projectId || projectId === "new") return;
+
+    // Don't reload if we already loaded this project this session
+    if (loadedRef.current === projectId) return;
+
+    // If the store already has this project's files (e.g. just generated), skip DB fetch
+    if (storeProjectId === projectId && files.length > 0) {
+      loadedRef.current = projectId;
+      return;
+    }
+
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/ai/projects/${projectId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const loadedFiles = data?.project?.files ?? [];
+        if (!loadedFiles.length) return;
+
+        loadedRef.current = projectId;
+        setProject(projectId);
+        setFiles(loadedFiles);
+
+        // Boot the preview with the loaded files
+        mountAndRun(loadedFiles);
+      } catch (err) {
+        console.error("[AIWorkspace] Failed to load project files:", err);
+      }
+    };
+
+    load();
+  }, [projectId, storeProjectId, files.length, setProject, setFiles, mountAndRun]);
+
+  return (
+    <div className="w-full h-full flex bg-background overflow-hidden">
+      {/* 📁 PROJECTS SIDEBAR */}
+      <div className="w-56 border-r shrink-0 overflow-hidden">
+        <ProjectSidebar subaccountId={subaccountId} />
+      </div>
+
+      {/* 💬 CHAT PANEL */}
+      <div className="w-[380px] border-r shrink-0 overflow-hidden">
+        <ChatPanel />
+      </div>
+
+      {/* 👀 LIVE PREVIEW */}
+      <div className="flex-1 min-w-0 overflow-hidden">
+        <LivePreview />
+      </div>
+    </div>
+  );
+};
+
+export default AIWorkspace;
+
+
+===== FILE NOT FOUND: src/app/(main)/subaccount/[subaccountId]/ai-builder/[projectId]/page.tsx =====
+
+
+
+===== FILE: src/lib/ai/stream/stream-pipeline.ts =====
+
+// src/lib/ai/stream/stream-pipeline.ts
+
+import { planProject } from "@/lib/ai/llm/pipeline";
+import { generateOneFile, type ProjectSpec, type FileSpec } from "@/lib/ai/llm/deepseek-generator";
+
+type FileType = {
+  path: string;
+  content: string;
+};
+
+// ─────────────────────────────────────────────────────────────
+// FIXED STREAM PIPELINE
+//
+// Root cause of ERR_INVALID_STATE + premature close:
+// The original 3-worker approach used queue.shift() in a while loop
+// across concurrent async workers — a classic race where all 3 workers
+// see an empty queue simultaneously and Promise.all resolves BEFORE
+// the last generateOneFile call actually completes.
+//
+// Fix: use a proper atomic index counter instead of shift(), so each
+// file slot is claimed exactly once. Workers pick the next unclaimed
+// index atomically. Promise.all only resolves after ALL workers exit,
+// which is only after ALL files are processed.
+// ─────────────────────────────────────────────────────────────
+
+const CONCURRENCY = 3;
+
+export async function streamProjectPipeline({
+  prompt,
+  onFile,
+  onDone,
+}: {
+  prompt: string;
+  onFile: (file: FileType) => Promise<void>;
+  onDone: () => void;
+}) {
+  console.log("🚀 [STREAM PIPELINE] Starting for prompt:", prompt.slice(0, 60));
+
+  const spec = await planProject(prompt);
+
+  if (!spec || !spec.files || spec.files.length === 0) {
+    console.error("❌ [STREAM PIPELINE] Planning returned null or empty files");
+    onDone();
+    return;
+  }
+
+  console.log(`✅ [STREAM PIPELINE] Plan has ${spec.files.length} files`);
+
+  const allPaths = spec.files.map((f) => f.path);
+  const files = spec.files;
+  const total = files.length;
+
+  // ✅ Atomic index — each worker claims the next unclaimed slot
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (true) {
+      // Claim the next file atomically
+      const idx = nextIndex++;
+      if (idx >= total) break;
+
+      const fileSpec: FileSpec = files[idx];
+
+      try {
+       async function generateWithRetry(
+  spec: ProjectSpec,
+  fileSpec: FileSpec,
+  allPaths: string[],
+  retries = 2
+) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await generateOneFile(spec, fileSpec, allPaths);
+    } catch (err) {
+      console.warn(`⚠️ Retry ${i + 1} for ${fileSpec.path}`);
+      if (i === retries) throw err;
+    }
+  }
+}
+const generated = await generateWithRetry(spec as ProjectSpec, fileSpec, allPaths);
+       // 🔒 Ensure file is valid BEFORE emitting
+if (
+  !generated?.content ||
+  generated.content.trim().length < 20
+) {
+  console.error(`❌ Skipping invalid file: ${fileSpec.path}`);
+  return;
+}
+
+// Optional: enforce critical files must exist
+if (fileSpec.path === "src/App.jsx" && !generated.content.includes("export default")) {
+  console.error("❌ App.jsx invalid — skipping");
+  return;
+}
+
+await onFile({
+  path: generated.path,
+  content: generated.content,
+});
+
+        console.log(`📄 [STREAM PIPELINE] Generated: ${generated.path}`);
+      } catch (err) {
+        console.error(`❌ [STREAM PIPELINE] Failed to generate ${fileSpec.path}:`, err);
+        // Don't rethrow — let other files continue
+      }
+    }
+  };
+
+  // Run CONCURRENCY workers, all sharing the same atomic index
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+  console.log("✅ [STREAM PIPELINE] All files done");
+  onDone();
+}

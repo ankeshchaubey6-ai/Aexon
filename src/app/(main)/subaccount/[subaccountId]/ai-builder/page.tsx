@@ -1,6 +1,6 @@
 // src/app/(main)/subaccount/[subaccountId]/ai-builder/page.tsx
 import { redirect } from "next/navigation";
-import { currentUser } from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
 import { Role } from "@prisma/client";
 import { getAuthUserDetails } from "@/queries/auth";
 import { db } from "@/lib/db";
@@ -15,14 +15,15 @@ const AIBuilderPage = async ({ params }: AIBuilderPageProps) => {
 
   if (!subaccountId) redirect("/subaccount/unauthorized");
 
-  const clerkUser = await currentUser();
-  if (!clerkUser) redirect("/agency/sign-in");
+  // ✅ auth() reads JWT locally — no outbound Clerk API call
+  const { userId } = auth();
+  if (!userId) redirect("/agency/sign-in");
 
   const authUser = await getAuthUserDetails();
   if (!authUser || !authUser.agency) redirect("/agency/sign-in");
 
-  const role = clerkUser.privateMetadata.role as Role | undefined;
-  if (!role) redirect("/subaccount/unauthorized");
+  // ✅ role from DB, not clerkUser.privateMetadata (which is always undefined here)
+  const role = authUser.role as Role;
 
   const isOwnerOrAdmin =
     role === Role.AGENCY_OWNER || role === Role.AGENCY_ADMIN;

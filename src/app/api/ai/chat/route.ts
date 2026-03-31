@@ -1,128 +1,108 @@
-import { NextRequest, NextResponse } from "next/server";
-import { planProject } from "@/lib/ai/llm/plan-project";
-import { generateCodeFromAI } from "@/lib/ai/llm/generate-code";
-import { loadBaseTemplate } from "@/lib/ai/template/load-template";
-import { mergeFiles } from "@/lib/ai/engine/merge-files";
-import { autoFixFiles } from "@/lib/ai/engine/auto-fix";
-import { addMessage } from "@/queries/ai-messages";
+// src/app/api/ai/chat/route.ts
+
+import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { v4 as uuid } from "uuid";
+import { streamProjectPipeline } from "@/lib/ai/stream/stream-pipeline";
+
+type FileType = {
+  path: string;
+  content: string;
+};
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { prompt, subaccountId, projectId } = body;
+    const { prompt, subAccountId } = body;
 
-    if (!prompt || !subaccountId || !projectId) {
-      return NextResponse.json(
-        { error: "Missing fields" },
-        { status: 400 }
+    if (!prompt || !subAccountId) {
+      return new Response(
+        JSON.stringify({ error: "prompt and subAccountId are required" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // =========================
-    // 💬 SAVE USER MESSAGE
-    // =========================
-    await addMessage({
-      id: uuid(),
-      projectId,
-      role: "USER",
-      content: prompt,
-      status: "DONE",
-      createdAt: new Date().toISOString(),
-    });
-
-    // =========================
-    // 🧠 STEP 1: PLAN
-    // =========================
-    const plan = await planProject(prompt);
-
-    if (!plan) {
-      return NextResponse.json(
-        { error: "Planning failed" },
-        { status: 500 }
-      );
-    }
-
-    // =========================
-    // ⚡ STEP 2: GENERATE AI FILES
-    // =========================
-    const aiFiles = await generateCodeFromAI(
-      JSON.stringify(plan, null, 2)
-    );
-
-    if (!aiFiles.length) {
-      return NextResponse.json(
-        { error: "Generation failed" },
-        { status: 500 }
-      );
-    }
-
-    // =========================
-    // 📦 STEP 3: LOAD TEMPLATE
-    // =========================
-    const baseFiles = loadBaseTemplate();
-
-    // =========================
-    // 🔀 STEP 4: MERGE + FIX
-    // =========================
-    const mergedFiles = mergeFiles(baseFiles, aiFiles);
-    const finalFiles = autoFixFiles(mergedFiles);
-
-    // =========================
-    // 💾 STEP 5: SAVE FILES TO DB
-    // =========================
-
-    // 🧹 delete old files
-    await db.aIProjectFile.deleteMany({
-      where: { projectId },
-    });
-
-    // 💾 insert new files
-    await db.aIProjectFile.createMany({
-      data: finalFiles.map((file) => ({
-        projectId,
-        path: file.path,
-        content: file.content,
-      })),
-    });
-
-    // 📝 update project metadata
-    await db.aIProject.update({
-      where: { id: projectId },
+    const project = await db.aIProject.create({
       data: {
-        name: plan.projectName || "AI Project",
-        updatedAt: new Date(),
+        name: prompt.slice(0, 40),
+        subAccountId,
       },
     });
 
-    // =========================
-    // 🤖 SAVE ASSISTANT MESSAGE
-    // =========================
-    await addMessage({
-      id: uuid(),
-      projectId,
-      role: "ASSISTANT",
-      content: "🚀 Project generated successfully!",
-      status: "DONE",
-      createdAt: new Date().toISOString(),
+    const encoder = new TextEncoder();
+
+    // ✅ FIX 1: track closed state so parallel workers never enqueue after close
+    let isClosed = false;
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (data: object) => {
+          // ✅ Guard every enqueue — parallel workers race to write
+          if (isClosed) return;
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          } catch {
+            // swallow — controller may have closed between the check and enqueue
+          }
+        };
+
+        const close = () => {
+          if (isClosed) return;
+          isClosed = true;
+          try { controller.close(); } catch { /* already closed */ }
+        };
+
+        send({ type: "start" });
+        send({ type: "project", projectId: project.id });
+
+        try {
+          await streamProjectPipeline({
+            prompt,
+
+            onFile: async (file: FileType) => {
+              if (isClosed) return; // ✅ skip if already done
+
+              // Save to DB (don't let DB errors crash the stream)
+              try {
+                await db.aIProjectFile.create({
+                  data: {
+                    projectId: project.id,
+                    path: file.path,
+                    content: file.content,
+                  },
+                });
+              } catch (dbErr) {
+                console.error(`❌ DB save failed for ${file.path}:`, dbErr);
+              }
+
+              send({ type: "file", file });
+            },
+
+            onDone: () => {
+              send({ type: "done", projectId: project.id });
+              close();
+            },
+          });
+        } catch (err) {
+          console.error("❌ [Chat Route] Pipeline error:", err);
+          send({ type: "error", message: "Generation failed" });
+          close();
+        }
+      },
     });
 
-    // =========================
-    // 🚀 RESPONSE
-    // =========================
-    return NextResponse.json({
-      success: true,
-      projectId,
-      files: finalFiles,
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "x-project-id": project.id,
+      },
     });
-
   } catch (err) {
-    console.error("AI Chat Error:", err);
-
-    return NextResponse.json(
-      { error: "Internal error" },
-      { status: 500 }
+    console.error("❌ [Chat Route] Request error:", err);
+    return new Response(
+      JSON.stringify({ error: "Internal server error" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
 }

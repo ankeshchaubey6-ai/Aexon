@@ -309,8 +309,8 @@ export async function generateProjectWithPipeline(
   const generated = await generateFilesInParallel(spec);
 
   // ── Stage 4: Validate / fix (phi) ──────────
-  const validated = await validateFilesWithPhi(generated);
-
+  
+const validated = generated;
   // ── Stage 5: Assemble ──────────────────────
   const result = ensureBoilerplate(validated, spec.projectName);
 

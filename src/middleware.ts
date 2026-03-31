@@ -7,19 +7,24 @@ export default clerkMiddleware((auth, req) => {
 
   const res = NextResponse.next();
 
-  // Only apply WebContainer headers on AI builder routes
   const isAIBuilder = url.pathname.includes("/ai-builder");
+
   if (isAIBuilder) {
+    // Cross-Origin-Opener-Policy: same-origin is required for crossOriginIsolated.
     res.headers.set("Cross-Origin-Opener-Policy", "same-origin");
-    res.headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+
+    // ✅ FIX: Use "credentialless" instead of "require-corp".
+    // "require-corp" blocks any cross-origin resource that doesn't explicitly
+    // set Cross-Origin-Resource-Policy, breaking avatar images, CDN assets, etc.
+    // "credentialless" enables crossOriginIsolated (SharedArrayBuffer for
+    // WebContainer) without requiring every third-party resource to opt in.
+    res.headers.set("Cross-Origin-Embedder-Policy", "credentialless");
   }
 
-  // Allow main localhost app
   if (hostname === "localhost:3000") {
     return res;
   }
 
-  // Ignore static files
   if (
     url.pathname.startsWith("/_next") ||
     url.pathname.startsWith("/favicon") ||
@@ -46,3 +51,4 @@ export default clerkMiddleware((auth, req) => {
 export const config = {
   matcher: ["/((?!_next|.*\\..*).*)"],
 };
+

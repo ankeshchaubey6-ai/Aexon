@@ -1,8 +1,6 @@
 // src/lib/ai/llm/deepseek-generator.ts
 //
 // Stage 3 — deepseek-v3.2 (NVIDIA catalog)
-// One API call per component file, all run in parallel via Promise.all()
-// Called by pipeline.ts — not used directly by routes.
 //
 
 import OpenAI from "openai";
@@ -16,7 +14,7 @@ const client = new OpenAI({
 export interface FileSpec {
   path: string;
   description: string;
-  dependencies: string[];
+  dependencies?: string[]; // optional — planner sometimes omits it
 }
 
 export interface ProjectSpec {
@@ -28,8 +26,6 @@ export interface ProjectSpec {
 
 // ─────────────────────────────────────────────
 // Generate a single file with deepseek-v3.2
-// Boilerplate files (package.json, vite.config, main.jsx, index.html)
-// are short-circuited locally — no API call needed.
 // ─────────────────────────────────────────────
 
 export async function generateOneFile(
@@ -39,7 +35,10 @@ export async function generateOneFile(
 ): Promise<AIFileNode> {
   console.log(`  ⚡ [STAGE 3] deepseek-v3.2 — ${fileSpec.path}`);
 
-  // Short-circuit boilerplate — no LLM needed
+  // Normalise dependencies — planner sometimes omits the field
+  const deps = Array.isArray(fileSpec.dependencies) ? fileSpec.dependencies : [];
+
+  // ── Short-circuit boilerplate — no LLM needed ──────────────
   if (fileSpec.path === "src/main.jsx") {
     return { path: fileSpec.path, content: makeMainJsx(), type: "file" };
   }
@@ -47,25 +46,22 @@ export async function generateOneFile(
     return { path: fileSpec.path, content: makeViteConfig(), type: "file" };
   }
   if (fileSpec.path === "package.json") {
-    return {
-      path: fileSpec.path,
-      content: makePackageJson(spec.projectName),
-      type: "file",
-    };
+    return { path: fileSpec.path, content: makePackageJson(spec.projectName), type: "file" };
   }
   if (fileSpec.path === "index.html") {
-    return {
-      path: fileSpec.path,
-      content: makeIndexHtml(spec.projectName),
-      type: "file",
-    };
+    return { path: fileSpec.path, content: makeIndexHtml(spec.projectName), type: "file" };
+  }
+  // Tailwind/PostCSS configs — generated locally, no LLM
+  if (fileSpec.path === "tailwind.config.js") {
+    return { path: fileSpec.path, content: makeTailwindConfig(), type: "file" };
+  }
+  if (fileSpec.path === "postcss.config.js") {
+    return { path: fileSpec.path, content: makePostcssConfig(), type: "file" };
   }
 
+  // ── LLM generation ─────────────────────────────────────────
   const otherComponents = allPaths
-    .filter(
-      (p) =>
-        p !== fileSpec.path && (p.endsWith(".jsx") || p.endsWith(".tsx"))
-    )
+    .filter((p) => p !== fileSpec.path && (p.endsWith(".jsx") || p.endsWith(".tsx")))
     .map((p) => `  - ${p}`)
     .join("\n");
 
@@ -79,7 +75,7 @@ RULES:
 - React functional components with hooks only
 - No react-router-dom. No external libraries besides react and react-dom.
 - Export default at the bottom of every .jsx file
-- All imports use relative paths (e.g. ./components/Header — not @/)
+- All imports use relative paths with FULL EXTENSION (e.g. import App from './App.jsx' NOT './App')
 - No TypeScript; plain .jsx and .css files only
 - Write complete, production-quality code — no placeholders or TODOs
 - CSS: include media queries, hover effects, smooth transitions
@@ -88,7 +84,7 @@ RULES:
 
   const userPrompt = `File to write: ${fileSpec.path}
 What it does: ${fileSpec.description}
-Imports needed: ${fileSpec.dependencies.join(", ") || "none"}
+Imports needed: ${deps.join(", ") || "none"}
 
 Write the complete file now.`;
 
@@ -105,27 +101,62 @@ Write the complete file now.`;
 
     let content = completion.choices[0]?.message?.content || "";
 
-    // Strip any stray markdown fences the model might add
     content = content
       .replace(/^```(?:jsx?|javascript|css|html|json)?\s*/gim, "")
       .replace(/^```\s*$/gim, "")
       .trim();
 
+    // ✅ Fix extensionless imports that Vite can't resolve in WebContainer
+    // e.g. import App from './App'  →  import App from './App.jsx'
+    content = fixExtensionlessImports(content, allPaths);
+
     console.log(`  ✅ [STAGE 3] ${fileSpec.path} (${content.length} chars)`);
     return { path: fileSpec.path, content, type: "file" };
   } catch (err) {
     console.error(`  ❌ [STAGE 3] ${fileSpec.path} failed:`, err);
-    return {
-      path: fileSpec.path,
-      content: makeFallbackComponent(fileSpec),
-      type: "file",
-    };
+    return { path: fileSpec.path, content: makeFallbackComponent(fileSpec), type: "file" };
   }
 }
 
 // ─────────────────────────────────────────────
-// Parallel generation — Stage 3 entry point
-// Called by pipeline.ts after Stage 2 splits the plan
+// Fix extensionless relative imports
+// Vite in WebContainer requires explicit .jsx extensions
+// ─────────────────────────────────────────────
+
+function fixExtensionlessImports(content: string, allPaths: string[]): string {
+  // Build a set of all known jsx paths (without extension) for lookup
+  const jsxPaths = new Set(
+    allPaths
+      .filter((p) => p.endsWith(".jsx"))
+      .map((p) => p.replace(/\.jsx$/, ""))
+  );
+
+  // Match: import Something from './Something' or '../components/X'
+  // Only fix if the path doesn't already have an extension
+  return content.replace(
+    /from\s+(['"])(\.\.?\/[^'"]+)(['"])/g,
+    (match, q1, importPath, q2) => {
+      // Already has extension — leave it alone
+      if (/\.\w+$/.test(importPath)) return match;
+
+      // Check if a .jsx file exists for this import
+      // Strip leading ./ or ../ and compare against known paths
+      const normalized = importPath.replace(/^\.\.?\//, "");
+      const hasMatch = Array.from(jsxPaths).some((p) =>
+        p.endsWith(normalized) || p.endsWith("/" + normalized)
+      );
+
+      if (hasMatch) {
+        return `from ${q1}${importPath}.jsx${q2}`;
+      }
+
+      return match;
+    }
+  );
+}
+
+// ─────────────────────────────────────────────
+// Parallel generation entry point
 // ─────────────────────────────────────────────
 
 export async function generateFilesInParallel(
@@ -133,9 +164,7 @@ export async function generateFilesInParallel(
 ): Promise<AIFileNode[]> {
   const allPaths = spec.files.map((f) => f.path);
 
-  console.log(
-    `⚡ [STAGE 3] Generating ${spec.files.length} files in parallel with deepseek-v3.2...`
-  );
+  console.log(`⚡ [STAGE 3] Generating ${spec.files.length} files in parallel with deepseek-v3.2...`);
 
   const results = await Promise.all(
     spec.files.map((fileSpec) => generateOneFile(spec, fileSpec, allPaths))
@@ -146,17 +175,14 @@ export async function generateFilesInParallel(
 }
 
 // ─────────────────────────────────────────────
-// Edit helper — rewrites only affected files
-// Used by edit pipeline in pipeline.ts
+// Edit helper
 // ─────────────────────────────────────────────
 
 export async function rewriteFilesWithDeepseek(
   instructions: string,
   filesToEdit: AIFileNode[]
 ): Promise<AIFileNode[]> {
-  console.log(
-    `✏️ [STAGE 3 EDIT] deepseek-v3.2 rewriting ${filesToEdit.length} file(s)`
-  );
+  console.log(`✏️ [STAGE 3 EDIT] deepseek-v3.2 rewriting ${filesToEdit.length} file(s)`);
 
   const results = await Promise.all(
     filesToEdit.map(async (file): Promise<AIFileNode> => {
@@ -179,8 +205,7 @@ Preserve all unrelated logic. Change only what is needed.`,
           ],
         });
 
-        let content =
-          completion.choices[0]?.message?.content || file.content;
+        let content = completion.choices[0]?.message?.content || file.content;
         content = content
           .replace(/^```(?:jsx?|javascript|css)?\s*/gim, "")
           .replace(/^```\s*$/gim, "")
@@ -190,7 +215,7 @@ Preserve all unrelated logic. Change only what is needed.`,
         return { ...file, content };
       } catch (err) {
         console.error(`  ❌ [STAGE 3 EDIT] ${file.path} failed:`, err);
-        return file; // Keep original on failure
+        return file;
       }
     })
   );
@@ -199,7 +224,7 @@ Preserve all unrelated logic. Change only what is needed.`,
 }
 
 // ─────────────────────────────────────────────
-// Local boilerplate generators (no LLM)
+// Boilerplate generators (no LLM)
 // ─────────────────────────────────────────────
 
 function makePackageJson(projectName: string): string {
@@ -237,9 +262,10 @@ function makeIndexHtml(projectName: string): string {
 }
 
 function makeMainJsx(): string {
+  // ✅ FIXED: use ./App.jsx (with extension) so Vite resolves it in WebContainer
   return `import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
+import App from './App.jsx';
 import './App.css';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
@@ -258,11 +284,28 @@ export default defineConfig({
 });`;
 }
 
+function makeTailwindConfig(): string {
+  return `/** @type {import('tailwindcss').Config} */
+export default {
+  content: ["./index.html", "./src/**/*.{js,jsx,ts,tsx}"],
+  theme: { extend: {} },
+  plugins: [],
+};`;
+}
+
+function makePostcssConfig(): string {
+  return `export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+};`;
+}
+
 function makeFallbackComponent(fileSpec: FileSpec): string {
   if (fileSpec.path.endsWith(".css")) {
     return `.container { max-width: 1200px; margin: 0 auto; padding: 20px; }`;
   }
-  const name =
-    fileSpec.path.split("/").pop()?.replace(".jsx", "") || "Component";
+  const name = fileSpec.path.split("/").pop()?.replace(".jsx", "") || "Component";
   return `import React from 'react';\n\nfunction ${name}() {\n  return (\n    <div className="container">\n      <h2>${name}</h2>\n    </div>\n  );\n}\n\nexport default ${name};`;
 }

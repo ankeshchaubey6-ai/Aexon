@@ -528,6 +528,7 @@ model AIProject {
   subAccountId String
 
   files AIProjectFile[]
+  messages AIMessage[]
 
   @@map("AIProject")
   @@index([subAccountId])
@@ -546,5 +547,21 @@ model AIProjectFile {
 
   @@map("AIProjectFile")
   @@unique([projectId, path])
+  @@index([projectId])
+}
+model AIMessage {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projectId      String
+  role           String  // "USER" | "ASSISTANT"
+  content        String  @db.LongText
+  status         String  @default("PENDING") // "PENDING" | "DONE" | "ERROR"
+  filesGenerated Int?
+
+  project AIProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("AIMessage")
   @@index([projectId])
 }

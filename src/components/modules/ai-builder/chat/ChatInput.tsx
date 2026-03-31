@@ -2,12 +2,65 @@
 
 import { useState } from "react";
 
-const ChatInput = ({ onSend, loading }: any) => {
-  const [value, setValue] = useState("");
+type Props = {
+  subAccountId: string;
+  addFileToState: (file: { path: string; content: string }) => void;
+};
 
-  const handleSend = () => {
-    if (!value.trim()) return;
-    onSend(value);
+const ChatInput = ({ subAccountId, addFileToState }: Props) => {
+  const [value, setValue] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSend = async () => {
+    if (!value.trim() || loading) return;
+
+    setLoading(true);
+
+    try {
+      const res = await fetch("/api/ai/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: value,
+          subAccountId,
+        }),
+      });
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No stream");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value: chunk } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(chunk, { stream: true });
+
+        const parts = buffer.split("\n\n");
+
+        for (const part of parts) {
+          if (!part.startsWith("data:")) continue;
+
+          const json = part.replace("data: ", "");
+          const data = JSON.parse(json);
+
+          if (data.type === "file") {
+            addFileToState(data.file);
+          }
+
+          if (data.type === "done") {
+            setLoading(false);
+          }
+        }
+
+        buffer = parts[parts.length - 1];
+      }
+    } catch (err) {
+      console.error(err);
+      setLoading(false);
+    }
+
     setValue("");
   };
 

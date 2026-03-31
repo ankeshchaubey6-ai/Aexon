@@ -3,6 +3,7 @@
 // src/app/(main)/subaccount/[subaccountId]/ai-builder/AIBuilderClient.tsx
 
 import React, { useState, useTransition, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import {
   Sparkles, Plus, Code2, Clock, CalendarDays,
@@ -10,9 +11,6 @@ import {
 } from "lucide-react";
 import { createAIProject, deleteAIProject } from "./actions";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TYPES
-// ─────────────────────────────────────────────────────────────────────────────
 type AIProject = {
   id: string;
   name: string;
@@ -21,9 +19,6 @@ type AIProject = {
   updatedAt: Date;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
 function formatRelative(date: Date): string {
   const diff = Date.now() - new Date(date).getTime();
   const m = Math.floor(diff / 60000);
@@ -56,7 +51,7 @@ function accent(id: string) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CREATE PROJECT MODAL — calls server action directly, no fetch/API route
+// CREATE PROJECT MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 function CreateProjectModal({
   subaccountId,
@@ -85,13 +80,9 @@ function CreateProjectModal({
     setError("");
     const trimmed = name.trim();
     if (!trimmed) { setError("Project name is required."); return; }
-
     startTransition(async () => {
       const result = await createAIProject(subaccountId, trimmed);
-      if ("error" in result) {
-        setError(result.error);
-        return;
-      }
+      if ("error" in result) { setError(result.error); return; }
       onCreated(result.project);
       router.push(`/subaccount/${subaccountId}/ai-builder/${result.project.id}`);
     });
@@ -104,7 +95,6 @@ function CreateProjectModal({
     >
       <div className="relative w-full max-w-md mx-4 bg-[#0f0f11] border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
         <div className="h-[2px] w-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500" />
-
         <div className="flex items-start justify-between px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center">
@@ -115,15 +105,11 @@ function CreateProjectModal({
               <p className="text-xs text-white/40 mt-0.5">Name your project to get started</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            disabled={isPending}
-            className="text-white/30 hover:text-white/70 transition-colors p-1 rounded-lg hover:bg-white/5"
-          >
+          <button onClick={onClose} disabled={isPending}
+            className="text-white/30 hover:text-white/70 transition-colors p-1 rounded-lg hover:bg-white/5">
             <X className="w-4 h-4" />
           </button>
         </div>
-
         <form onSubmit={handleSubmit} className="px-6 pb-6 flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-white/50 uppercase tracking-widest">
@@ -140,31 +126,21 @@ function CreateProjectModal({
               className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-white/20 outline-none focus:border-violet-500/60 transition-all"
             />
           </div>
-
           {error && (
             <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
               ⚠ {error}
             </p>
           )}
-
           <div className="flex gap-3 pt-1">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={isPending}
-              className="flex-1 py-2.5 rounded-xl border border-white/10 text-sm text-white/50 hover:text-white/80 hover:bg-white/5 transition-all"
-            >
+            <button type="button" onClick={onClose} disabled={isPending}
+              className="flex-1 py-2.5 rounded-xl border border-white/10 text-sm text-white/50 hover:text-white/80 hover:bg-white/5 transition-all">
               Cancel
             </button>
-            <button
-              type="submit"
-              disabled={isPending || !name.trim()}
-              className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-sm font-medium text-white transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-violet-500/20"
-            >
+            <button type="submit" disabled={isPending || !name.trim()}
+              className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-sm font-medium text-white transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-violet-500/20">
               {isPending
                 ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Creating…</>
-                : <><Sparkles className="w-3.5 h-3.5" /> Launch Builder</>
-              }
+                : <><Sparkles className="w-3.5 h-3.5" /> Launch Builder</>}
             </button>
           </div>
         </form>
@@ -183,7 +159,6 @@ function ProjectThumbnail({ project }: { project: AIProject }) {
     w: 30 + ((seed * (i + 3)) % 50),
     y: 14 + i * 14,
   }));
-
   return (
     <svg viewBox="0 0 200 90" xmlns="http://www.w3.org/2000/svg" className="w-full h-full">
       <rect width="200" height="90" fill="#0a0a0c" />
@@ -196,8 +171,6 @@ function ProjectThumbnail({ project }: { project: AIProject }) {
       <rect width="200" height="90" fill={`url(#g-${project.id})`} />
       <rect x="8" y="8" width="184" height="10" rx="2" fill="white" fillOpacity="0.05" />
       <rect x="12" y="11" width="28" height="4" rx="1" fill={a.from} fillOpacity="0.7" />
-      <rect x="160" y="11" width="12" height="4" rx="1" fill="white" fillOpacity="0.1" />
-      <rect x="175" y="11" width="12" height="4" rx="1" fill="white" fillOpacity="0.1" />
       {bars.map((b, i) => (
         <rect key={i} x="12" y={b.y + 10} width={b.w} height="4" rx="1"
           fill={i === 0 ? a.from : "white"} fillOpacity={i === 0 ? 0.6 : 0.08} />
@@ -208,9 +181,102 @@ function ProjectThumbnail({ project }: { project: AIProject }) {
       <rect x="118" y="39" width="55" height="3" rx="1" fill="white" fillOpacity="0.07" />
       <rect x="118" y="45" width="48" height="3" rx="1" fill="white" fillOpacity="0.05" />
       <rect x="118" y="55" width="30" height="8" rx="2" fill={a.from} fillOpacity="0.4" />
-      <rect x="12" y="68" width="85" height="2" rx="1" fill="white" fillOpacity="0.04" />
-      <rect x="12" y="73" width="60" height="2" rx="1" fill="white" fillOpacity="0.04" />
     </svg>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PORTAL DROPDOWN — renders in document.body, never clipped by overflow-hidden
+// ─────────────────────────────────────────────────────────────────────────────
+function PortalMenu({
+  anchorRef,
+  onClose,
+  onOpen,
+  onDeleteConfirm,
+  confirmDelete,
+  setConfirmDelete,
+  isPending,
+}: {
+  anchorRef: React.RefObject<HTMLButtonElement>;
+  onClose: () => void;
+  onOpen: () => void;
+  onDeleteConfirm: () => void;
+  confirmDelete: boolean;
+  setConfirmDelete: (v: boolean) => void;
+  isPending: boolean;
+}) {
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Position below and right-aligned to the anchor button
+    if (anchorRef.current) {
+      const r = anchorRef.current.getBoundingClientRect();
+      setPos({ top: r.bottom + 4, left: r.right - 176 });
+    }
+
+    // Click-outside closes menu
+    const handler = (e: MouseEvent) => {
+      if (
+        menuRef.current &&
+        !menuRef.current.contains(e.target as Node) &&
+        anchorRef.current &&
+        !anchorRef.current.contains(e.target as Node)
+      ) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [anchorRef, onClose]);
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      style={{ position: "fixed", top: pos.top, left: pos.left, width: 176, zIndex: 9999 }}
+      className="bg-[#1c1c20] border border-white/10 rounded-xl shadow-2xl overflow-hidden"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* Open Builder */}
+      <button
+        className="w-full flex items-center gap-2 px-3 py-2.5 text-xs text-white/70 hover:bg-white/5 hover:text-white transition-colors"
+        onClick={() => { onClose(); onOpen(); }}
+      >
+        <ExternalLink className="w-3.5 h-3.5" /> Open Builder
+      </button>
+
+      <div className="h-px bg-white/5 mx-2" />
+
+      {/* Delete with confirm step */}
+      {confirmDelete ? (
+        <div className="p-2.5 flex flex-col gap-2">
+          <p className="text-[11px] text-red-400 px-1">Delete this project?</p>
+          <div className="flex gap-1.5">
+            <button
+              className="flex-1 py-1.5 text-[11px] rounded-lg border border-white/10 text-white/40 hover:text-white/60 transition-colors"
+              onClick={() => setConfirmDelete(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="flex-1 py-1.5 text-[11px] rounded-lg bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50 flex items-center justify-center"
+              onClick={onDeleteConfirm}
+              disabled={isPending}
+            >
+              {isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : "Delete"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          className="w-full flex items-center gap-2 px-3 py-2.5 text-xs text-red-400/70 hover:bg-red-500/10 hover:text-red-400 transition-colors"
+          onClick={() => setConfirmDelete(true)}
+        >
+          <Trash2 className="w-3.5 h-3.5" /> Delete Project
+        </button>
+      )}
+    </div>,
+    document.body
   );
 }
 
@@ -230,6 +296,7 @@ function ProjectCard({
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const btnRef = useRef<HTMLButtonElement>(null);
   const a = accent(project.id);
 
   const openProject = () =>
@@ -238,64 +305,52 @@ function ProjectCard({
   const handleDelete = () => {
     startTransition(async () => {
       const result = await deleteAIProject(subaccountId, project.id);
-      if ("success" in result) onDeleted(project.id);
+      if ("success" in result) {
+        setMenuOpen(false);
+        onDeleted(project.id);
+      } else {
+        console.error("[delete project]", result.error);
+      }
     });
   };
 
   return (
-    <div
-      className="group relative bg-[#0f0f11] border border-white/8 rounded-2xl overflow-hidden hover:border-white/20 transition-all duration-300 hover:shadow-2xl cursor-pointer flex flex-col"
-      onClick={openProject}
-    >
-      <div className="relative h-[90px] overflow-hidden bg-[#0a0a0c] shrink-0">
+    // ✅ NO onClick on card — clicking card does nothing, only buttons navigate
+    <div className="group relative bg-[#0f0f11] border border-white/8 rounded-2xl hover:border-white/20 transition-all duration-300 hover:shadow-2xl flex flex-col">
+
+      {/* Thumbnail area — overflow-hidden scoped here only */}
+      <div className="relative h-[90px] rounded-t-2xl overflow-hidden bg-[#0a0a0c] shrink-0">
         <ProjectThumbnail project={project} />
 
+        {/* ⋮ options button */}
         <button
-          className="absolute top-1.5 right-1.5 w-6 h-6 rounded-lg bg-black/50 border border-white/10 text-white/40 hover:text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all"
-          onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+          ref={btnRef}
+          className="absolute top-1.5 right-1.5 w-7 h-7 rounded-lg bg-black/60 border border-white/10 text-white/50 hover:text-white hover:bg-black/80 flex items-center justify-center transition-all"
+          onClick={(e) => {
+            e.stopPropagation();
+            setMenuOpen((v) => !v);
+            setConfirmDelete(false);
+          }}
+          title="Project options"
         >
-          <MoreVertical className="w-3 h-3" />
+          <MoreVertical className="w-3.5 h-3.5" />
         </button>
-
-        {menuOpen && (
-          <div
-            className="absolute top-8 right-1.5 w-40 bg-[#1c1c20] border border-white/10 rounded-xl shadow-2xl z-20 overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              className="w-full flex items-center gap-2 px-3 py-2.5 text-xs text-white/60 hover:bg-white/5 hover:text-white transition-colors"
-              onClick={() => { setMenuOpen(false); openProject(); }}
-            >
-              <ExternalLink className="w-3 h-3" /> Open Builder
-            </button>
-            <div className="h-px bg-white/5 mx-2" />
-            {confirmDelete ? (
-              <div className="p-2 flex flex-col gap-1.5">
-                <p className="text-[10px] text-red-400 px-1">Delete this project?</p>
-                <div className="flex gap-1.5">
-                  <button
-                    className="flex-1 py-1.5 text-[10px] rounded-lg border border-white/10 text-white/40 hover:text-white/60 transition-colors"
-                    onClick={() => setConfirmDelete(false)}
-                  >Cancel</button>
-                  <button
-                    className="flex-1 py-1.5 text-[10px] rounded-lg bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50"
-                    onClick={handleDelete}
-                    disabled={isPending}
-                  >{isPending ? "…" : "Delete"}</button>
-                </div>
-              </div>
-            ) : (
-              <button
-                className="w-full flex items-center gap-2 px-3 py-2.5 text-xs text-red-400/60 hover:bg-red-500/10 hover:text-red-400 transition-colors"
-                onClick={() => setConfirmDelete(true)}
-              >
-                <Trash2 className="w-3 h-3" /> Delete
-              </button>
-            )}
-          </div>
-        )}
       </div>
 
+      {/* Portal dropdown — lives in document.body, never clipped */}
+      {menuOpen && (
+        <PortalMenu
+          anchorRef={btnRef}
+          onClose={() => { setMenuOpen(false); setConfirmDelete(false); }}
+          onOpen={openProject}
+          onDeleteConfirm={handleDelete}
+          confirmDelete={confirmDelete}
+          setConfirmDelete={setConfirmDelete}
+          isPending={isPending}
+        />
+      )}
+
+      {/* Card body */}
       <div className="flex flex-col flex-1 p-4 gap-2">
         <h3 className="text-sm font-semibold text-white truncate">
           <span
@@ -322,10 +377,19 @@ function ProjectCard({
             <span>Edited {formatRelative(project.updatedAt)}</span>
           </div>
         </div>
+
+        {/* ✅ Explicit "Open Builder" button — the ONLY way to open a project */}
+        <button
+          onClick={openProject}
+          className="mt-2 w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-white/8 text-xs text-white/40 hover:text-white hover:border-white/20 hover:bg-white/5 transition-all"
+        >
+          <ExternalLink className="w-3 h-3" />
+          Open Builder
+        </button>
       </div>
 
       <div
-        className="absolute bottom-0 left-0 right-0 h-[1.5px] opacity-0 group-hover:opacity-100 transition-opacity"
+        className="absolute bottom-0 left-0 right-0 h-[1.5px] opacity-0 group-hover:opacity-100 transition-opacity rounded-b-2xl"
         style={{ background: `linear-gradient(90deg, ${a.from}, ${a.to})` }}
       />
     </div>

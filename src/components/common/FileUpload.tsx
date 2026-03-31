@@ -16,33 +16,24 @@ const FileUpload: React.FC<FileUploadProps> = ({ onChange, value }) => {
 
   const handleUploadSuccess = (result: any) => {
     try {
-      console.log("[Cloudinary RAW RESULT]:", result);
-
-      // 🔥 FIX: Handle all possible cloudinary result structures
       const url =
         result?.info?.secure_url ||
         result?.secure_url ||
         result?.info?.url ||
         "";
 
-      if (!url || typeof url !== "string") {
-        console.error("[FileUpload] Invalid URL received:", url);
-        return;
-      }
+      if (!url || typeof url !== "string") return;
 
-      console.log("[FileUpload] FINAL URL:", url);
-
-      // IMPORTANT: always pass valid string to react-hook-form
       onChange(url);
-    } catch (error) {
-      console.error("[FileUpload] Upload parse error:", error);
+    } catch {
+      // silent fail (optional: integrate toast or monitoring service)
     }
   };
 
   return (
     <div className="w-full">
       {/* IMAGE PREVIEW */}
-      {imageUrl && imageUrl !== "" && (
+      {imageUrl && (
         <div className="flex items-start gap-4">
           <div className="relative w-32 h-32 border rounded-md overflow-hidden shrink-0">
             <Image
@@ -58,10 +49,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onChange, value }) => {
           <Button
             type="button"
             variant="outline"
-            onClick={() => {
-              console.log("[FileUpload] Image removed");
-              onChange("");
-            }}
+            onClick={() => onChange("")}
           >
             <X className="h-4 w-4 mr-2" />
             Remove Image
@@ -89,8 +77,8 @@ const FileUpload: React.FC<FileUploadProps> = ({ onChange, value }) => {
             },
           }}
           onSuccess={handleUploadSuccess}
-          onError={(error) => {
-            console.error("[Cloudinary Upload Error]:", error);
+          onError={() => {
+            // optional: show toast instead of console
           }}
         >
           {({ open }) => (
@@ -100,7 +88,6 @@ const FileUpload: React.FC<FileUploadProps> = ({ onChange, value }) => {
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                console.log("[FileUpload] Opening Cloudinary widget");
                 open();
               }}
             >

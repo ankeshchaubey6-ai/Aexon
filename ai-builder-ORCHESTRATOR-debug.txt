@@ -1,0 +1,2358 @@
+
+
+===== FILE: src/lib/ai/engine/ai-orchestrator.ts =====
+
+// src/lib/ai/engine/ai-orchestrator.ts
+
+import {
+  AIFileNode,
+  AIProject,
+  AIProjectPlan,
+  AIProjectError,
+} from "../types/ai-project.types";
+
+import { CodeGenerator } from "./code-generator";
+import { CodePatcher } from "./code-patcher";
+
+// =========================
+// 🔥 GLOBAL STORE (survives Next.js HMR reloads)
+// =========================
+const g = global as typeof global & {
+  _aiFileStore?: Map<string, AIFileNode[]>;
+  _aiMetaStore?: Map<string, AIProject>;
+};
+
+if (!g._aiFileStore) g._aiFileStore = new Map<string, AIFileNode[]>();
+if (!g._aiMetaStore) g._aiMetaStore = new Map<string, AIProject>();
+
+const inMemoryProjects = g._aiFileStore;
+const projectMetadata = g._aiMetaStore;
+
+export class AIOrchestrator {
+  // =========================
+  // 🚀 CREATE PROJECT (OPTIONAL USE)
+  // =========================
+  static createProject(
+    projectId: string,
+    prompt: string,
+    plan?: AIProjectPlan
+  ): AIFileNode[] {
+    try {
+      let files: AIFileNode[];
+
+      if (plan) {
+        files = CodeGenerator.generateFromPlan(projectId, plan);
+      } else {
+        files = CodeGenerator.generate(projectId, prompt);
+      }
+
+      inMemoryProjects.set(projectId, files);
+
+      projectMetadata.set(projectId, {
+        id: projectId,
+        name: plan?.projectName || prompt.slice(0, 50),
+        subaccountId: "",
+        files,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      return files;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new AIProjectError(
+        `Failed to create project: ${message}`,
+        "CREATE_FAILED",
+        500
+      );
+    }
+  }
+
+  // =========================
+  // 🔥 DIRECT SET (used by generate route)
+  // =========================
+  static setProjectFiles(projectId: string, files: AIFileNode[]) {
+    if (!Array.isArray(files) || files.length === 0) {
+      throw new AIProjectError(
+        "Invalid files provided",
+        "INVALID_FILES",
+        400
+      );
+    }
+
+    inMemoryProjects.set(projectId, files);
+
+    projectMetadata.set(projectId, {
+      id: projectId,
+      name: "AI Project",
+      subaccountId: "",
+      files,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    console.log(`✅ Project ${projectId} stored with ${files.length} files`);
+    console.log(`📦 Total projects in store: ${inMemoryProjects.size}`);
+  }
+
+  // =========================
+  // ✏️ EDIT PROJECT
+  // =========================
+  static async editProject(
+    projectId: string,
+    instructions: string,
+    useAI: boolean = false,
+    aiClient?: any
+  ): Promise<AIFileNode[]> {
+    try {
+      const existing = inMemoryProjects.get(projectId);
+
+      if (!existing) {
+        console.error(
+          `❌ Project ${projectId} not found. Store has ${inMemoryProjects.size} projects:`,
+          Array.from(inMemoryProjects.keys())
+        );
+        throw new AIProjectError(
+          `Project ${projectId} not found`,
+          "PROJECT_NOT_FOUND",
+          404
+        );
+      }
+
+      let updated: AIFileNode[];
+
+      if (useAI && aiClient) {
+        updated = await CodePatcher.patchWithAI(existing, instructions, aiClient);
+      } else {
+        updated = CodePatcher.patch(existing, instructions);
+      }
+
+      inMemoryProjects.set(projectId, updated);
+
+      const metadata = projectMetadata.get(projectId);
+      if (metadata) {
+        metadata.updatedAt = new Date().toISOString();
+        metadata.files = updated;
+        projectMetadata.set(projectId, metadata);
+      }
+
+      return updated;
+    } catch (error: unknown) {
+      if (error instanceof AIProjectError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new AIProjectError(
+        `Failed to edit project: ${message}`,
+        "EDIT_FAILED",
+        500
+      );
+    }
+  }
+
+  // =========================
+  // 🔄 UPDATE FILES (SAFE MERGE)
+  // =========================
+  static updateProjectFiles(
+    projectId: string,
+    newFiles: AIFileNode[]
+  ): AIFileNode[] {
+    try {
+      const existing = inMemoryProjects.get(projectId);
+
+      if (!existing) {
+        throw new AIProjectError(
+          `Project ${projectId} not found`,
+          "PROJECT_NOT_FOUND",
+          404
+        );
+      }
+
+      const fileMap = new Map<string, AIFileNode>();
+
+      existing.forEach((f) => fileMap.set(f.path, f));
+      newFiles.forEach((f) => {
+        if (f.path && typeof f.content === "string") {
+          fileMap.set(f.path, f);
+        }
+      });
+
+      const updated = Array.from(fileMap.values());
+
+      inMemoryProjects.set(projectId, updated);
+
+      const metadata = projectMetadata.get(projectId);
+      if (metadata) {
+        metadata.updatedAt = new Date().toISOString();
+        metadata.files = updated;
+        projectMetadata.set(projectId, metadata);
+      }
+
+      console.log(`✅ Updated project ${projectId} with ${newFiles.length} new files`);
+      return updated;
+    } catch (error: unknown) {
+      if (error instanceof AIProjectError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new AIProjectError(
+        `Failed to update files: ${message}`,
+        "UPDATE_FAILED",
+        500
+      );
+    }
+  }
+
+  // =========================
+  // 📂 GET FILES
+  // =========================
+  static getProjectFiles(projectId: string): AIFileNode[] {
+    const files = inMemoryProjects.get(projectId);
+
+    if (!files) {
+      console.error(
+        `❌ Project ${projectId} not found. Store has ${inMemoryProjects.size} projects:`,
+        Array.from(inMemoryProjects.keys())
+      );
+      throw new AIProjectError(
+        `Project ${projectId} not found`,
+        "PROJECT_NOT_FOUND",
+        404
+      );
+    }
+
+    return files;
+  }
+
+  // =========================
+  // 📊 METADATA
+  // =========================
+  static getProjectMetadata(projectId: string): AIProject | undefined {
+    return projectMetadata.get(projectId);
+  }
+
+  static getAllProjects(): AIProject[] {
+    return Array.from(projectMetadata.values());
+  }
+
+  // =========================
+  // ❌ DELETE
+  // =========================
+  static deleteProject(projectId: string): boolean {
+    const deleted = inMemoryProjects.delete(projectId);
+    projectMetadata.delete(projectId);
+    return deleted;
+  }
+
+  // =========================
+  // ✅ VALIDATE
+  // =========================
+  static validateProject(files: AIFileNode[]): boolean {
+    const validation = CodePatcher.validateFiles(files);
+
+    if (!validation.isValid) {
+      console.error("❌ Validation failed:", validation.errors);
+      return false;
+    }
+
+    if (validation.warnings.length > 0) {
+      console.warn("⚠️ Warnings:", validation.warnings);
+    }
+
+    return true;
+  }
+
+  // =========================
+  // 📈 STATS
+  // =========================
+  static getProjectStats(projectId: string) {
+    const files = this.getProjectFiles(projectId);
+
+    const fileTypes: Record<string, number> = {};
+    let totalSize = 0;
+
+    files.forEach((file) => {
+      const ext = file.path.split(".").pop() || "unknown";
+      fileTypes[ext] = (fileTypes[ext] || 0) + 1;
+      totalSize += new Blob([file.content]).size;
+    });
+
+    return {
+      fileCount: files.length,
+      totalSize,
+      fileTypes,
+    };
+  }
+}
+
+
+===== FILE: src/lib/ai/engine/project-planner.ts =====
+
+// src/lib/ai/engine/project-planner.ts
+//
+// Stage 1 wrapper — delegates to the pipeline's kimi-k2-instruct planner.
+// Kept as a class so the rest of the codebase can call
+// ProjectPlanner.planFromPrompt() without importing pipeline.ts directly.
+//
+
+import { planProject } from "@/lib/ai/llm/pipeline";
+
+export interface BasicPlan {
+  name: string;
+  pages: string[];
+}
+
+export class ProjectPlanner {
+  // ─────────────────────────────────────────────
+  // Full AI plan via kimi-k2-instruct (Stage 1)
+  // Returns the full ProjectSpec used by the pipeline,
+  // or null if planning fails.
+  // ─────────────────────────────────────────────
+  static async planFromPrompt(prompt: string) {
+    return planProject(prompt);
+  }
+
+  // ─────────────────────────────────────────────
+  // Quick local heuristic — zero-latency fallback.
+  // Used when you need an instant structural hint
+  // without waiting for a network call.
+  // ─────────────────────────────────────────────
+  static plan(prompt: string): BasicPlan {
+    const lower = prompt.toLowerCase();
+
+    if (lower.includes("landing")) {
+      return {
+        name: "ai-landing-app",
+        pages: ["home", "pricing", "contact"],
+      };
+    }
+
+    if (lower.includes("dashboard")) {
+      return {
+        name: "ai-dashboard-app",
+        pages: ["dashboard", "analytics", "settings"],
+      };
+    }
+
+    if (lower.includes("blog")) {
+      return {
+        name: "ai-blog-app",
+        pages: ["home", "post", "about"],
+      };
+    }
+
+    if (lower.includes("portfolio")) {
+      return {
+        name: "ai-portfolio-app",
+        pages: ["home", "projects", "contact"],
+      };
+    }
+
+    if (lower.includes("ecommerce") || lower.includes("shop")) {
+      return {
+        name: "ai-shop-app",
+        pages: ["home", "products", "cart", "checkout"],
+      };
+    }
+
+    return {
+      name: "ai-generated-app",
+      pages: ["home"],
+    };
+  }
+}
+
+
+===== FILE: src/lib/ai/engine/code-generator.ts =====
+
+// src/lib/ai/engine/code-generator.ts
+import { AIFileNode, AIProjectPlan } from "../types/ai-project.types";
+
+export class CodeGenerator {
+  static generate(projectId: string, prompt: string): AIFileNode[] {
+    const timestamp = new Date().toISOString();
+    const projectName = prompt.slice(0, 40) || "AI Generated App";
+    
+    return [
+      {
+        path: "src/App.jsx",
+        content: `...`, // Same content as before
+        type: "file"
+      },
+      {
+        path: "src/App.css",
+        content: `...`, // Same content as before
+        type: "file"
+      },
+      {
+        path: "src/main.jsx",
+        content: `...`, // Same content as before
+        type: "file"
+      }
+    ];
+  }
+
+  static generateFromPlan(projectId: string, plan: AIProjectPlan): AIFileNode[] {
+    // Generate project based on detailed plan
+    const files: AIFileNode[] = [];
+    
+    // Generate main App component
+    files.push({
+      path: "src/App.jsx",
+      content: this.generateAppComponent(plan),
+      type: "file"
+    });
+    
+    // Generate CSS
+    files.push({
+      path: "src/App.css",
+      content: this.generateStyles(plan),
+      type: "file"
+    });
+    
+    // Generate main entry
+    files.push({
+      path: "src/main.jsx",
+      content: this.generateEntryPoint(),
+      type: "file"
+    });
+    
+    // Generate additional components
+    plan.components.forEach(component => {
+      files.push({
+        path: `src/components/${component}.jsx`,
+        content: this.generateComponent(component),
+        type: "file"
+      });
+    });
+    
+    return files;
+  }
+
+  private static generateAppComponent(plan: AIProjectPlan): string {
+    return `
+import React from 'react';
+import './App.css';
+
+function App() {
+  return (
+    <div className="app">
+      <h1>${plan.projectName}</h1>
+      <p>${plan.description}</p>
+      <div className="features">
+        ${plan.features.map(f => `<div className="feature">${f}</div>`).join('\n        ')}
+      </div>
+    </div>
+  );
+}
+
+export default App;
+    `;
+  }
+
+  private static generateStyles(plan: AIProjectPlan): string {
+    return `
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px;
+  text-align: center;
+  color: white;
+}
+
+h1 {
+  font-size: 3rem;
+  margin-bottom: 20px;
+}
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+  margin-top: 40px;
+}
+
+.feature {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  padding: 20px;
+  border-radius: 10px;
+}
+    `;
+  }
+
+  private static generateEntryPoint(): string {
+    return `
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+import './App.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+    `;
+  }
+
+  private static generateComponent(name: string): string {
+    return `
+import React from 'react';
+
+export default function ${name}() {
+  return (
+    <div className="${name.toLowerCase()}">
+      <h2>${name} Component</h2>
+    </div>
+  );
+}
+    `;
+  }
+}
+
+
+===== FILE: src/app/api/ai/chat/route.ts =====
+
+import { NextRequest } from "next/server";
+import { db } from "@/lib/db";
+import { streamProjectPipeline } from "@/lib/ai/stream/stream-pipeline";
+
+type FileType = {
+  path: string;
+  content: string;
+};
+
+export async function POST(req: NextRequest) {
+  const { prompt, subAccountId } = await req.json();
+
+  const project = await db.aIProject.create({
+    data: {
+      name: prompt.slice(0, 40),
+      subAccountId,
+    },
+  });
+
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      // ✅ SEND INITIAL EVENT (prevents blocking)
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({ type: "start" })}\n\n`
+        )
+      );
+
+      try {
+        // 🚀 DO NOT AWAIT → allow streaming
+        streamProjectPipeline({
+          prompt,
+
+          onFile: async (file: FileType) => {
+            await db.aIProjectFile.create({
+              data: {
+                projectId: project.id,
+                path: file.path,
+                content: file.content,
+              },
+            });
+
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  type: "file",
+                  file,
+                })}\n\n`
+              )
+            );
+          },
+
+          onDone: () => {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ type: "done" })}\n\n`
+              )
+            );
+            controller.close();
+          },
+        }).catch((err) => {
+          console.error("❌ Pipeline Error:", err);
+          controller.close();
+        });
+
+      } catch (err) {
+        console.error("❌ Stream Error:", err);
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+
+===== FILE: src/lib/ai/stream/stream-pipeline.ts =====
+
+import { planProject } from "@/lib/ai/llm/plan-project";
+import { generateFilesInParallel } from "@/lib/ai/llm/deepseek-generator";
+
+type FileType = {
+  path: string;
+  content: string;
+};
+
+export async function streamProjectPipeline({
+  prompt,
+  onFile,
+  onDone,
+}: {
+  prompt: string;
+  onFile: (file: FileType) => Promise<void>;
+  onDone: () => void;
+}) {
+  const spec = await planProject(prompt);
+
+  if (!spec || !spec.files) {
+    onDone();
+    return;
+  }
+
+  const queue = [...spec.files];
+
+  const workers = Array(3)
+    .fill(null)
+    .map(async () => {
+      while (queue.length) {
+        const file = queue.shift();
+        if (!file) break;
+
+        const result = await generateFilesInParallel({
+          ...spec,
+          files: [file],
+        });
+
+        const generated = result[0];
+
+        await onFile({
+          path: generated.path,
+          content: generated.content,
+        });
+      }
+    });
+
+  await Promise.all(workers);
+
+  onDone();
+}
+
+
+===== FILE: src/lib/ai/llm/pipeline.ts =====
+
+// src/lib/ai/llm/pipeline.ts
+//
+// Full multi-model pipeline — 5 stages for generation, 3 stages for editing.
+//
+//  Stage 1 — kimi-k2-instruct       → JSON project spec (planner)
+//  Stage 2 — your code              → split spec into per-file tasks
+//  Stage 3 — deepseek-v3.2          → parallel codegen (one call per file)
+//  Stage 4 — phi-3.5-mini-instruct  → syntax fix on broken JSX only
+//  Stage 5 — your code              → assemble + ensureBoilerplate
+//
+//  Edit path (only affected files):
+//  kimi → identifies which files change
+//  deepseek → rewrites them in parallel
+//  phi → validates the edited files
+//
+
+import OpenAI from "openai";
+import { AIFileNode } from "../types/ai-project.types";
+import {
+  generateFilesInParallel,
+  rewriteFilesWithDeepseek,
+  type ProjectSpec,
+} from "./deepseek-generator";
+import { validateFilesWithPhi } from "./phi-fixer";
+
+const client = new OpenAI({
+  apiKey: process.env.NVIDIA_API_KEY!,
+  baseURL: "https://integrate.api.nvidia.com/v1",
+});
+
+// ─────────────────────────────────────────────
+// STAGE 1 — PLANNER  (kimi-k2-instruct)
+// Small output, pure JSON. kimi excels at structured planning.
+// max_tokens: 2000  temp: 0.2
+// ─────────────────────────────────────────────
+
+export async function planProject(
+  userPrompt: string
+): Promise<ProjectSpec | null> {
+  console.log("🧠 [STAGE 1] kimi-k2-instruct — planning");
+
+  try {
+    const completion = await client.chat.completions.create({
+      model: "moonshotai/kimi-k2-instruct",
+      temperature: 0.2,
+      max_tokens: 2000,
+      messages: [
+        {
+          role: "system",
+          content: `You are a React architect. Return ONLY raw JSON — no markdown, no backticks, no explanation. Start with { and end with }.
+
+{
+  "projectName": "PascalCase no spaces",
+  "description": "one sentence",
+  "globalContext": "2-3 sentences: shared design system, color palette, font, spacing used across all files",
+  "files": [
+    {
+      "path": "src/components/Header.jsx",
+      "description": "sticky nav with logo, links, CTA button — glassmorphism style",
+      "dependencies": []
+    }
+  ]
+}
+
+Rules:
+- Always include: src/App.jsx, src/App.css, src/main.jsx, index.html, package.json, vite.config.js
+- One component per file; break every visual section into its own component
+- No react-router-dom; no libraries besides react and react-dom
+- For a landing page: 8–15 component files. For a large site: up to 30 files
+- Each description must be specific enough to code from on its own
+- List ALL files you want generated`,
+        },
+        {
+          role: "user",
+          content: userPrompt,
+        },
+      ],
+    });
+
+    let text = completion.choices[0]?.message?.content || "";
+    text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+
+    if (start === -1 || end === -1) {
+      console.error("❌ [STAGE 1] No JSON object found in planner response");
+      return null;
+    }
+
+    try {
+      const spec = JSON.parse(text.slice(start, end + 1)) as ProjectSpec;
+      console.log(
+        `✅ [STAGE 1] Plan: ${spec.files.length} files — ${spec.files.map((f) => f.path).join(", ")}`
+      );
+      return spec;
+    } catch {
+      // Attempt trailing-comma repair
+      const fixed = text
+        .slice(start, end + 1)
+        .replace(/,(\s*[}\]])/g, "$1");
+      const spec = JSON.parse(fixed) as ProjectSpec;
+      console.log(`✅ [STAGE 1] Plan recovered: ${spec.files.length} files`);
+      return spec;
+    }
+  } catch (err) {
+    console.error("❌ [STAGE 1] Planner failed:", err);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
+// STAGE 2 — COMPONENT SPLITTER  (your code)
+// Splits the JSON spec into per-file task descriptors.
+// No API call. Validates the spec and normalises paths.
+// ─────────────────────────────────────────────
+
+function splitPlanIntoTasks(spec: ProjectSpec): ProjectSpec {
+  console.log(`📦 [STAGE 2] Splitting ${spec.files.length} file tasks`);
+
+  const normalised: ProjectSpec = {
+    ...spec,
+    files: spec.files.map((f) => ({
+      path: f.path.replace(/^\/+/, ""), // strip leading slashes
+      description: f.description || `${f.path} component`,
+      dependencies: Array.isArray(f.dependencies) ? f.dependencies : [],
+    })),
+  };
+
+  console.log(
+    `✅ [STAGE 2] Tasks ready: ${normalised.files.map((f) => f.path).join(", ")}`
+  );
+  return normalised;
+}
+
+// ─────────────────────────────────────────────
+// STAGE 5 — ASSEMBLER  (your code)
+// Merges generated files, writes package.json, vite.config,
+// index.html, auto-builds App.jsx if missing, and — crucially —
+// scans every JSX file for local CSS imports and stubs any that
+// don't exist yet (prevents Vite "does the file exist?" crashes).
+// ─────────────────────────────────────────────
+
+/**
+ * Parse all `import "./Foo.css"` and `import "../bar.css"` statements
+ * from a JSX file and resolve them to project-relative paths.
+ *
+ * e.g. file at "src/components/Header.jsx" importing "./Header.css"
+ *      → "src/components/Header.css"
+ */
+function extractLocalCssImports(file: AIFileNode): string[] {
+  // Match: import "./Something.css"  or  import '../Something.css'
+  const importRegex = /import\s+['"](\.[^'"]+\.css)['"]/g;
+  const dir = file.path.split("/").slice(0, -1).join("/");
+  const resolved: string[] = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = importRegex.exec(file.content)) !== null) {
+    const rel = match[1]; // e.g. "./Header.css"
+
+    // Resolve relative to the file's directory
+    const segments = `${dir}/${rel}`.split("/");
+    const normalised: string[] = [];
+    for (const seg of segments) {
+      if (seg === "..") normalised.pop();
+      else if (seg !== ".") normalised.push(seg);
+    }
+    resolved.push(normalised.join("/"));
+  }
+  return resolved;
+}
+
+/**
+ * Generate a minimal stub CSS for a component based on its name.
+ * Produces a scoped class reset + a couple of sensible defaults so
+ * the component renders without layout breakage.
+ */
+function stubCss(cssPath: string): string {
+  // Derive a BEM-style root class from the filename, e.g. "header"
+  const name = cssPath
+    .split("/")
+    .pop()!
+    .replace(".css", "")
+    .toLowerCase();
+
+  return `/* ${cssPath} — auto-generated stub */
+.${name} {
+  box-sizing: border-box;
+}
+
+.${name} * {
+  box-sizing: border-box;
+}
+`;
+}
+
+function ensureBoilerplate(
+  files: AIFileNode[],
+  projectName: string
+): AIFileNode[] {
+  const map = new Map(files.map((f) => [f.path, f]));
+
+  const ensure = (path: string, content: string) => {
+    if (!map.has(path)) {
+      map.set(path, { path, content, type: "file" });
+      console.log(`➕ [STAGE 5] Ensured: ${path}`);
+    }
+  };
+
+  ensure("package.json", makePackageJson(projectName));
+  ensure("index.html", makeIndexHtml(projectName));
+  ensure("src/main.jsx", makeMainJsx());
+  ensure("vite.config.js", makeViteConfig());
+
+  // Auto-build App.jsx from available components if missing
+  if (!map.has("src/App.jsx")) {
+    const components = Array.from(map.keys())
+      .filter(
+        (p) => p.startsWith("src/components/") && p.endsWith(".jsx")
+      )
+      .map((p) => ({
+        name: p.split("/").pop()!.replace(".jsx", ""),
+        importPath: "./" + p.replace("src/", "").replace(".jsx", ""),
+      }));
+
+    const imports = components
+      .map((c) => `import ${c.name} from '${c.importPath}';`)
+      .join("\n");
+    const renders = components
+      .map((c) => `      <${c.name} />`)
+      .join("\n");
+
+    map.set("src/App.jsx", {
+      path: "src/App.jsx",
+      content: `import React from 'react';\nimport './App.css';\n${imports}\n\nfunction App() {\n  return (\n    <div className="app">\n${renders}\n    </div>\n  );\n}\n\nexport default App;`,
+      type: "file",
+    });
+    console.log("➕ [STAGE 5] Auto-built src/App.jsx");
+  }
+
+  if (!map.has("src/App.css")) {
+    map.set("src/App.css", {
+      path: "src/App.css",
+      content: `* { margin: 0; padding: 0; box-sizing: border-box; }\nbody { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }\n.app { min-height: 100vh; }`,
+      type: "file",
+    });
+  }
+
+  // ── CSS stub pass ─────────────────────────────────────────────────────
+  // deepseek freely writes  import "./Header.css"  inside components but
+  // the planner never lists those CSS files in the spec, so they're never
+  // generated → Vite crashes with "does the file exist?".
+  //
+  // Solution: scan every JSX file, resolve every local .css import, and
+  // create a stub for any path that isn't already in the map.
+  // Zero extra API calls — pure string processing.
+  const jsxFiles = Array.from(map.values()).filter((f) =>
+    f.path.endsWith(".jsx")
+  );
+
+  let stubbedCount = 0;
+  for (const jsx of jsxFiles) {
+    const cssPaths = extractLocalCssImports(jsx);
+    for (const cssPath of cssPaths) {
+      if (!map.has(cssPath)) {
+        map.set(cssPath, {
+          path: cssPath,
+          content: stubCss(cssPath),
+          type: "file",
+        });
+        stubbedCount++;
+        console.log(`🎨 [STAGE 5] Stubbed missing CSS: ${cssPath}`);
+      }
+    }
+  }
+
+  if (stubbedCount > 0) {
+    console.log(`🎨 [STAGE 5] Created ${stubbedCount} CSS stub(s) for missing imports`);
+  }
+  // ─────────────────────────────────────────────────────────────────────
+
+  const result = Array.from(map.values());
+  console.log(`✅ [STAGE 5] Final project: ${result.length} files`);
+  return result;
+}
+
+// ─────────────────────────────────────────────
+// MAIN EXPORT — full 5-stage generation pipeline
+// ─────────────────────────────────────────────
+
+export async function generateProjectWithPipeline(
+  userPrompt: string
+): Promise<AIFileNode[]> {
+  console.log("🚀 ═══════════════════════════════");
+  console.log("🚀 PIPELINE START — GENERATION");
+  console.log("🚀 ═══════════════════════════════");
+
+  // ── Stage 1: Plan ──────────────────────────
+  const rawSpec = await planProject(userPrompt);
+  if (!rawSpec) {
+    console.error("❌ Planning failed — using minimal fallback");
+    return minimalFallback(userPrompt);
+  }
+
+  // ── Stage 2: Split ─────────────────────────
+  const spec = splitPlanIntoTasks(rawSpec);
+
+  // ── Stage 3: Parallel codegen (deepseek) ───
+  const generated = await generateFilesInParallel(spec);
+
+  // ── Stage 4: Validate / fix (phi) ──────────
+  
+const validated = generated;
+  // ── Stage 5: Assemble ──────────────────────
+  const result = ensureBoilerplate(validated, spec.projectName);
+
+  console.log("✅ ═══════════════════════════════");
+  console.log(`✅ PIPELINE DONE — ${result.length} files`);
+  console.log("✅ ═══════════════════════════════");
+
+  return result;
+}
+
+// ─────────────────────────────────────────────
+// EDIT PIPELINE — 3-stage edit path
+// kimi → identifies which files change
+// deepseek → rewrites them in parallel
+// phi → validates edited files
+// ─────────────────────────────────────────────
+
+export async function editProjectWithPipeline(
+  instructions: string,
+  existingFiles: AIFileNode[]
+): Promise<AIFileNode[]> {
+  console.log("✏️ ═══════════════════════════════");
+  console.log("✏️ EDIT PIPELINE START");
+  console.log("✏️ ═══════════════════════════════");
+
+  const fileMap = new Map(existingFiles.map((f) => [f.path, f]));
+
+  // ── Edit Stage 1: kimi identifies affected files ──
+  console.log("🧠 [EDIT 1] kimi-k2-instruct — identifying files to change");
+
+  let pathsToEdit: string[] = [];
+
+  try {
+    const fileList = existingFiles.map((f) => `  - ${f.path}`).join("\n");
+
+    const planCompletion = await client.chat.completions.create({
+      model: "moonshotai/kimi-k2-instruct",
+      temperature: 0.2,
+      max_tokens: 400,
+      messages: [
+        {
+          role: "system",
+          content: `You are a React architect. Return ONLY a raw JSON array of file paths that need to change.
+Example: ["src/App.css", "src/components/Header.jsx"]
+No markdown. No explanation. Start with [ and end with ].`,
+        },
+        {
+          role: "user",
+          content: `Edit request: "${instructions}"\n\nProject files:\n${fileList}`,
+        },
+      ],
+    });
+
+    let planText = planCompletion.choices[0]?.message?.content || "[]";
+    planText = planText
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
+
+    const s = planText.indexOf("[");
+    const e = planText.lastIndexOf("]");
+    if (s !== -1 && e !== -1) {
+      pathsToEdit = JSON.parse(planText.slice(s, e + 1)) as string[];
+    }
+
+    console.log(`✅ [EDIT 1] kimi identified: ${pathsToEdit.join(", ")}`);
+  } catch (err) {
+    console.warn("⚠️ [EDIT 1] kimi failed — defaulting to App.jsx + App.css:", err);
+    pathsToEdit = existingFiles.some((f) => f.path === "src/App.css")
+      ? ["src/App.css", "src/App.jsx"]
+      : ["src/App.jsx"];
+  }
+
+  if (pathsToEdit.length === 0) {
+    console.warn("⚠️ [EDIT 1] Empty file list — defaulting to App.jsx + App.css");
+    pathsToEdit = ["src/App.jsx", "src/App.css"];
+  }
+
+  // ── Edit Stage 2: deepseek rewrites affected files ──
+  const filesToEdit = pathsToEdit
+    .map((p) => fileMap.get(p))
+    .filter((f): f is AIFileNode => !!f);
+
+  const rewritten = await rewriteFilesWithDeepseek(instructions, filesToEdit);
+
+  // ── Edit Stage 3: phi validates edited files ──
+  const validated = await validateFilesWithPhi(rewritten);
+
+  // Merge back into the full file list (unchanged files stay intact)
+  validated.forEach((f) => fileMap.set(f.path, f));
+
+  const result = Array.from(fileMap.values());
+
+  console.log("✅ ═══════════════════════════════");
+  console.log(`✅ EDIT DONE — ${validated.length} file(s) updated`);
+  console.log("✅ ═══════════════════════════════");
+
+  return result;
+}
+
+// ─────────────────────────────────────────────
+// BOILERPLATE HELPERS
+// ─────────────────────────────────────────────
+
+function makePackageJson(projectName: string): string {
+  return JSON.stringify(
+    {
+      name: projectName.toLowerCase().replace(/\s+/g, "-"),
+      private: true,
+      version: "0.0.0",
+      type: "module",
+      scripts: { dev: "vite" },
+      dependencies: { react: "^18.2.0", "react-dom": "^18.2.0" },
+      devDependencies: {
+        vite: "^5.0.0",
+        "@vitejs/plugin-react": "^4.0.0",
+      },
+    },
+    null,
+    2
+  );
+}
+
+function makeIndexHtml(projectName: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${projectName}</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>`;
+}
+
+function makeMainJsx(): string {
+  return `import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './App.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);`;
+}
+
+function makeViteConfig(): string {
+  return `import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+});`;
+}
+
+function minimalFallback(prompt: string): AIFileNode[] {
+  const name = JSON.stringify(prompt.slice(0, 40) || "AI App");
+  return [
+    {
+      path: "package.json",
+      content: makePackageJson("ai-app"),
+      type: "file",
+    },
+    { path: "index.html", content: makeIndexHtml("AI App"), type: "file" },
+    { path: "src/main.jsx", content: makeMainJsx(), type: "file" },
+    { path: "vite.config.js", content: makeViteConfig(), type: "file" },
+    {
+      path: "src/App.jsx",
+      content: `import React from 'react';\nimport './App.css';\n\nconst TITLE = ${name};\n\nfunction App() {\n  return <div className="app"><h1>{TITLE}</h1></div>;\n}\n\nexport default App;`,
+      type: "file",
+    },
+    {
+      path: "src/App.css",
+      content: `.app { text-align: center; padding: 40px; font-family: sans-serif; }`,
+      type: "file",
+    },
+  ];
+}
+
+
+===== FILE: src/inngest/ai-builder.ts =====
+
+
+
+===== FILE: src/inngest/functions.ts =====
+
+import { inngest } from "./client";
+import { planProject } from "@/lib/ai/llm/plan-project";
+import { generateCodeFromAI } from "@/lib/ai/llm/generate-code";
+import { loadBaseTemplate } from "@/lib/ai/template/load-template";
+import { mergeFiles } from "@/lib/ai/engine/merge-files";
+import { db } from "@/lib/db";
+
+// =========================
+// TYPES
+// =========================
+type AIFile = {
+  path: string;
+  content: string;
+};
+
+type EventData = {
+  prompt: string;
+  projectId: string;
+  subaccountId: string;
+  isNewProject: boolean;
+};
+
+// =========================
+// FUNCTION (FIXED)
+// =========================
+export const aiBuilderFunction = inngest.createFunction(
+  { id: "ai-builder-run" }, // ✅ ONLY ONE CONFIG OBJECT
+
+  async ({ event, step }: any) => {
+    const { prompt, projectId, subaccountId, isNewProject } =
+      event.data as EventData;
+
+    // -------------------------
+    // USER MESSAGE
+    // -------------------------
+    await step.run("save-user-message", async () => {
+      await db.aIMessage.create({
+        data: {
+          projectId,
+          role: "USER",
+          content: prompt,
+          status: "DONE",
+        },
+      });
+    });
+
+    // -------------------------
+    // ASSISTANT PLACEHOLDER
+    // -------------------------
+    const assistantMessageId = await step.run(
+      "create-assistant-message",
+      async () => {
+        const msg = await db.aIMessage.create({
+          data: {
+            projectId,
+            role: "ASSISTANT",
+            content: "Building your app...",
+            status: "PENDING",
+          },
+        });
+        return msg.id;
+      }
+    );
+
+    // -------------------------
+    // PLAN
+    // -------------------------
+    const plan = await step.run("plan-project", async () => {
+      return planProject(prompt);
+    });
+
+    // -------------------------
+    // AI GENERATE
+    // -------------------------
+    const aiFiles: AIFile[] = await step.run(
+      "generate-code",
+      async () => {
+        const input = plan ? JSON.stringify(plan, null, 2) : prompt;
+        return generateCodeFromAI(input);
+      }
+    );
+
+    // -------------------------
+    // LOAD TEMPLATE
+    // -------------------------
+    const baseFiles: AIFile[] = await step.run(
+      "load-template",
+      async () => {
+        return loadBaseTemplate();
+      }
+    );
+
+    // -------------------------
+    // MERGE
+    // -------------------------
+    const finalFiles: AIFile[] = await step.run(
+      "merge-files",
+      async () => {
+        return mergeFiles(baseFiles, aiFiles);
+      }
+    );
+
+    // -------------------------
+    // SAVE FILES
+    // -------------------------
+    await step.run("save-files", async () => {
+      if (!finalFiles.length) return;
+
+      await db.aIProjectFile.deleteMany({
+        where: { projectId },
+      });
+
+      await db.aIProjectFile.createMany({
+        data: finalFiles.map((f: AIFile) => ({
+          projectId,
+          path: f.path,
+          content: f.content,
+        })),
+      });
+    });
+
+    // -------------------------
+    // UPDATE MESSAGE
+    // -------------------------
+    await step.run("update-message", async () => {
+      await db.aIMessage.update({
+        where: { id: assistantMessageId },
+        data: {
+          content: "🚀 Project ready! Preview starting...",
+          status: "DONE",
+          filesGenerated: aiFiles.length,
+        },
+      });
+    });
+
+    return {
+      projectId,
+      files: finalFiles.length,
+    };
+  }
+);
+
+
+===== FILE: src/inngest/client.ts =====
+
+import { Inngest } from "inngest";
+
+export const inngest = new Inngest({
+  id: "aexon-platform",
+});
+
+
+===== FILE: src/components/modules/ai-builder/state/ai-builder.store.ts =====
+
+"use client";
+
+import { create } from "zustand";
+import { AIFileNode } from "@/lib/ai/types/ai-project.types";
+
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+interface AIBuilderState {
+  projectId: string | null;
+  files: AIFileNode[];
+  activeFilePath: string | null;
+  messages: Message[];
+
+  setProject: (id: string) => void;
+  setFiles: (files: AIFileNode[]) => void;
+  setActiveFile: (path: string) => void;
+  updateFile: (path: string, content: string) => void;
+
+  addMessage: (msg: Message) => void;
+  reset: () => void;
+}
+
+export const useAIBuilderStore = create<AIBuilderState>((set, get) => ({
+  projectId: null,
+  files: [],
+  activeFilePath: null,
+  messages: [],
+
+  setProject: (id) =>
+    set({
+      projectId: id,
+    }),
+
+  setFiles: (files) =>
+    set({
+      files,
+      activeFilePath: files.length ? files[0].path : null,
+    }),
+
+  setActiveFile: (path) =>
+    set({
+      activeFilePath: path,
+    }),
+
+  updateFile: (path, content) => {
+    const { files } = get();
+
+    const updated = files.map((file) =>
+      file.path === path ? { ...file, content } : file
+    );
+
+    set({ files: updated });
+  },
+
+  addMessage: (msg) =>
+    set((state) => ({
+      messages: [...state.messages, msg],
+    })),
+
+  reset: () =>
+    set({
+      projectId: null,
+      files: [],
+      activeFilePath: null,
+      messages: [],
+    }),
+}));
+
+
+===== FILE: src/components/modules/ai-builder/chat/ChatPanel.tsx =====
+
+"use client";
+
+// src/components/modules/ai-builder/chat/ChatPanel.tsx
+
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  useTransition,
+} from "react";
+import { useParams, useRouter } from "next/navigation";
+import { Sparkles, Bot } from "lucide-react";
+
+import { useAIBuilderStore } from "../state/ai-builder.store";
+import { useWebContainer } from "../state/use-webcontainer";
+import ChatInput from "./ChatInput";
+import ChatMessage, { type AIMessage } from "./ChatMessage";
+
+const STARTERS = [
+  "SaaS landing page with pricing table and hero",
+  "Kanban board with drag and drop",
+  "E-commerce store with cart and checkout",
+  "Analytics dashboard with charts",
+  "Blog with markdown support",
+  "Portfolio with dark mode",
+];
+
+const ChatPanel = () => {
+  const params = useParams();
+  const router = useRouter();
+  const subaccountId = params?.subaccountId as string;
+
+  const { projectId, setProject, setFiles } = useAIBuilderStore();
+  const { remount, mountAndRun, isRunning } = useWebContainer();
+
+  const [messages, setMessages] = useState<AIMessage[]>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [, startTransition] = useTransition();
+
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // ✅ FIX: addFileToState (missing before)
+  const addFileToState = useCallback(
+    (file: { path: string; content: string }) => {
+      setFiles((prev: any[]) => {
+        const exists = prev.find((f) => f.path === file.path);
+        if (exists) return prev;
+
+        const updated = [...prev, file];
+
+        // 🔥 instantly mount to preview
+        if (isRunning) {
+          remount(updated);
+        } else {
+          mountAndRun(updated);
+        }
+
+        return updated;
+      });
+    },
+    [setFiles, isRunning, remount, mountAndRun]
+  );
+
+  // auto scroll
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  // send handler (simplified for streaming)
+  const handleSend = useCallback(
+    async (prompt: string) => {
+      if (!prompt.trim() || isGenerating) return;
+
+      setIsGenerating(true);
+
+      const optUserId = `opt-user-${Date.now()}`;
+      const optAsstId = `opt-asst-${Date.now()}`;
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: optUserId,
+          role: "USER",
+          content: prompt,
+          status: "DONE",
+          createdAt: new Date().toISOString(),
+        } as AIMessage,
+        {
+          id: optAsstId,
+          role: "ASSISTANT",
+          content: "Generating your project...",
+          status: "PENDING",
+          createdAt: new Date().toISOString(),
+        } as AIMessage,
+      ]);
+
+      try {
+        const res = await fetch("/api/ai/chat", {
+          method: "POST",
+          body: JSON.stringify({
+            prompt,
+            subAccountId: subaccountId,
+          }),
+        });
+
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No stream");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split("\n\n");
+
+          for (const part of parts) {
+            if (!part.startsWith("data:")) continue;
+
+            const json = part.replace("data: ", "");
+            const data = JSON.parse(json);
+
+            if (data.type === "file") {
+              addFileToState(data.file);
+            }
+
+            if (data.type === "done") {
+              setIsGenerating(false);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === optAsstId
+                    ? {
+                        ...m,
+                        content: "Project generated successfully 🚀",
+                        status: "DONE",
+                      }
+                    : m
+                )
+              );
+            }
+          }
+
+          buffer = parts[parts.length - 1];
+        }
+      } catch (err) {
+        console.error(err);
+        setIsGenerating(false);
+      }
+    },
+    [isGenerating, subaccountId, addFileToState]
+  );
+
+  const isEmpty = messages.length === 0;
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-2 border-b px-4 py-2.5 shrink-0">
+        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10">
+          <Bot className="h-3.5 w-3.5 text-primary" />
+        </div>
+        <span className="text-sm font-medium">AI Builder</span>
+        {isGenerating && (
+          <span className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="h-1.5 w-1.5 rounded-full bg-yellow-500 animate-pulse" />
+            Generating...
+          </span>
+        )}
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {isEmpty ? (
+          <EmptyState onSelect={handleSend} disabled={isGenerating} />
+        ) : (
+          <div className="py-2">
+            {messages.map((msg) => (
+              <ChatMessage key={msg.id} message={msg} />
+            ))}
+            <div ref={bottomRef} className="h-1" />
+          </div>
+        )}
+      </div>
+
+      {/* Input */}
+      <div className="shrink-0 border-t p-3">
+        <ChatInput
+          subAccountId={subaccountId}
+          addFileToState={addFileToState}
+        />
+      </div>
+    </div>
+  );
+};
+
+export default ChatPanel;
+
+// EMPTY STATE
+function EmptyState({
+  onSelect,
+  disabled,
+}: {
+  onSelect: (p: string) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-4 px-4 py-8 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10">
+        <Sparkles className="h-6 w-6 text-primary" />
+      </div>
+      <div>
+        <p className="text-sm font-medium">What would you like to build?</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Describe your app and AI will generate the full code
+        </p>
+      </div>
+      <div className="flex w-full max-w-xs flex-col gap-1.5">
+        {STARTERS.map((prompt) => (
+          <button
+            key={prompt}
+            onClick={() => onSelect(prompt)}
+            disabled={disabled}
+            className="rounded-lg border bg-muted/30 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+===== FILE: src/lib/ai/db.ts =====
+
+import { PrismaClient } from "@/generated/prisma";
+
+const globalForPrisma = global as unknown as { 
+    prisma: PrismaClient
+}
+
+export const prisma = globalForPrisma.prisma || new PrismaClient()
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
+
+
+===== FILE: src/queries/ai-projects.ts =====
+
+"use server";
+
+// src/queries/ai-projects.ts
+
+import { AIProject } from "@/lib/ai/types/ai-project.types";
+
+// =========================
+// 🔥 GLOBAL STORE (survives Next.js HMR reloads)
+// =========================
+const g = global as typeof global & {
+  _aiProjectsBySubaccount?: Map<string, AIProject[]>;
+};
+
+if (!g._aiProjectsBySubaccount) {
+  g._aiProjectsBySubaccount = new Map<string, AIProject[]>();
+}
+
+const inMemoryProjects = g._aiProjectsBySubaccount;
+
+// =========================
+// 📦 GET ALL PROJECTS
+// =========================
+export const getAIProjects = async (subaccountId: string) => {
+  return inMemoryProjects.get(subaccountId) || [];
+};
+
+// =========================
+// ➕ CREATE PROJECT (FIXED)
+// =========================
+export const createAIProject = async (
+  project: Omit<AIProject, "createdAt" | "updatedAt">
+): Promise<AIProject> => {
+  const existing = inMemoryProjects.get(project.subaccountId) || [];
+
+  const now = new Date().toISOString();
+
+  const fullProject: AIProject = {
+    ...project,
+    createdAt: now,        // ✅ FIX
+    updatedAt: now,        // ✅ optional but good practice
+  };
+
+  // Avoid duplicates — overwrite if same id already stored
+  const withoutDuplicate = existing.filter((p) => p.id !== project.id);
+
+  inMemoryProjects.set(project.subaccountId, [
+    ...withoutDuplicate,
+    fullProject,
+  ]);
+
+  console.log(
+    `✅ Project ${project.id} stored under subaccount ${project.subaccountId}`
+  );
+
+  return fullProject;
+};
+
+// =========================
+// 🔍 GET PROJECT BY ID
+// =========================
+export const getAIProjectById = async (projectId: string) => {
+  for (const [, projects] of inMemoryProjects.entries()) {
+    const found = projects.find((p) => p.id === projectId);
+    if (found) return found;
+  }
+  return null;
+};
+
+// =========================
+// ✏️ UPDATE PROJECT (FIXED)
+// =========================
+export const updateAIProject = async (
+  projectId: string,
+  data: Partial<AIProject>
+) => {
+  for (const [subaccountId, projects] of inMemoryProjects.entries()) {
+    const index = projects.findIndex((p) => p.id === projectId);
+
+    if (index !== -1) {
+      const updatedProject: AIProject = {
+        ...projects[index],
+        ...data,
+        updatedAt: new Date().toISOString(), // ✅ FIX
+      };
+
+      const updatedProjects = [...projects];
+      updatedProjects[index] = updatedProject;
+
+      inMemoryProjects.set(subaccountId, updatedProjects);
+
+      return updatedProject;
+    }
+  }
+
+  return null;
+};
+
+// =========================
+// ❌ DELETE PROJECT
+// =========================
+export const deleteAIProject = async (projectId: string) => {
+  for (const [subaccountId, projects] of inMemoryProjects.entries()) {
+    const index = projects.findIndex((p) => p.id === projectId);
+
+    if (index !== -1) {
+      const updated = projects.filter((p) => p.id !== projectId);
+      inMemoryProjects.set(subaccountId, updated);
+
+      console.log(`🗑️ Deleted project ${projectId}`);
+      return true;
+    }
+  }
+
+  return false;
+};
+
+
+===== FILE: src/queries/ai-messages.ts =====
+
+"use server";
+
+export type AIMessage = {
+  id: string;
+  projectId: string;
+  role: "USER" | "ASSISTANT";
+  content: string;
+  status: "PENDING" | "DONE" | "ERROR";
+  createdAt: string;
+};
+
+// 🔥 global store
+const g = global as typeof global & {
+  _aiMessages?: Map<string, AIMessage[]>;
+};
+
+if (!g._aiMessages) {
+  g._aiMessages = new Map();
+}
+
+const store = g._aiMessages;
+
+// =========================
+// ➕ ADD MESSAGE
+// =========================
+export const addMessage = async (message: AIMessage) => {
+  const existing = store.get(message.projectId) || [];
+  store.set(message.projectId, [...existing, message]);
+};
+
+// =========================
+// 📥 GET MESSAGES
+// =========================
+export const getMessages = async (projectId: string) => {
+  return store.get(projectId) || [];
+};
+
+
+===== FILE: prisma/schema.prisma =====
+
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider     = "mysql"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma"
+}
+
+enum Role {
+  AGENCY_OWNER
+  AGENCY_ADMIN
+  SUBACCOUNT_USER
+  SUBACCOUNT_GUEST
+}
+
+enum TriggerTypes {
+  CONTACT_FORM
+}
+
+enum ActionType {
+  CREATE_CONTACT
+}
+
+enum InvitationStatus {
+  ACCEPTED
+  REVOKED
+  PENDING
+}
+
+enum Plan {
+  // Product 1: Base Plan
+  price_1OpACCFdfEv15JJwACWCyqW2
+  // Product 2: Unlimited Plan
+  price_1OpACCFdfEv15JJw0k6lm8HC
+}
+
+enum Icon {
+  settings
+  chart
+  calendar
+  check
+  chip
+  compass
+  database
+  flag
+  home
+  info
+  link
+  lock
+  messages
+  notification
+  payment
+  power
+  receipt
+  shield
+  star
+  tune
+  videorecorder
+  wallet
+  warning
+  headphone
+  send
+  pipelines
+  person
+  category
+  contact
+  clipboardIcon
+  sparkles
+}
+
+model User {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name      String
+  avatarUrl String  @db.Text
+  email     String  @unique
+  role      Role    @default(SUBACCOUNT_USER)
+  agencyId  String?
+
+  agency       Agency?        @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  permissions  Permissions[]
+  tickets      Ticket[]
+  notification Notification[]
+
+  @@index([agencyId])
+}
+
+model Agency {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  connectAccountId   String? @default("")
+  customerId         String  @default("")
+  razorpayAccountId  String?
+  razorpayCustomerId String?
+  bankAccountDetails String? @db.LongText
+  name               String
+  agencyLogo         String  @db.Text
+  companyEmail       String  @db.Text
+  companyPhone       String
+  whiteLabel         Boolean @default(true)
+  address            String
+  city               String
+  zipCode            String
+  state              String
+  country            String
+  goal               Int     @default(5)
+
+  users          User[]
+  subAccounts    SubAccount[]
+  sidebarOptions AgencySidebarOption[]
+  invitations    Invitation[]
+  notifications  Notification[]
+  subscriptions  Subscription?
+  addOns         AddOns[]
+  payments       Payment[]
+}
+
+model SubAccount {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  connectAccountId String? @default("")
+  name             String
+  subAccountLogo   String  @db.Text
+  companyEmail     String  @db.Text
+  companyPhone     String
+  goal             Int     @default(5)
+  address          String
+  city             String
+  zipCode          String
+  state            String
+  country          String
+  agencyId         String
+
+  agency         Agency                    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  sidebarOptions SubAccountSidebarOption[]
+  permissions    Permissions[]
+  funnels        Funnel[]
+  media          Media[]
+  contacts       Contact[]
+  triggers       Trigger[]
+  automations    Automation[]
+  pipelines      Pipeline[]
+  tags           Tag[]
+  notifications  Notification[]
+  payments       Payment[]
+  
+
+  @@index([agencyId])
+}
+
+model Permissions {
+  id String @id @default(uuid())
+
+  email        String
+  subAccountId String
+  access       Boolean
+
+  user       User       @relation(fields: [email], references: [email], onDelete: Cascade)
+  subAccount SubAccount @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+
+  @@index([subAccountId])
+  @@index([email])
+}
+
+model Tag {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  color        String
+  subAccountId String
+
+  subAccount SubAccount @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+  tickets    Ticket[]
+
+  @@index([subAccountId])
+}
+
+model Pipeline {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  subAccountId String
+
+  lanes      Lane[]
+  subAccount SubAccount @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+
+  @@index([subAccountId])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  notification String
+  agencyId     String
+  subAccountId String?
+  userId       String
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agency     Agency      @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  subAccount SubAccount? @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+
+  @@index([agencyId])
+  @@index([subAccountId])
+  @@index([userId])
+}
+
+model Lane {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name       String
+  pipelineId String
+  order      Int    @default(0)
+  color      String
+
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  tickets  Ticket[]
+
+  @@index([pipelineId])
+}
+
+model Ticket {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name           String
+  laneId         String
+  order          Int      @default(0)
+  value          Decimal?
+  description    String?
+  customerId     String?
+  assignedUserId String?
+
+  lane     Lane     @relation(fields: [laneId], references: [id], onDelete: Cascade)
+  customer Contact? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  tags     Tag[]
+  assigned User?    @relation(fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  @@index([laneId])
+  @@index([customerId])
+  @@index([assignedUserId])
+}
+
+model Trigger {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  subAccountId String
+
+  type        TriggerTypes
+  subaccount  SubAccount   @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+  automations Automation[]
+
+  @@index([subAccountId])
+}
+
+model Automation {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  triggerId    String?
+  published    Boolean @default(false)
+  subAccountId String
+
+  trigger             Trigger?             @relation(fields: [triggerId], references: [id], onDelete: Cascade)
+  subaccount          SubAccount           @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+  actions             Action[]
+  automationInstances AutomationInstance[]
+
+  @@index([triggerId])
+  @@index([subAccountId])
+}
+
+model AutomationInstance {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  automationId String
+  active       Boolean @default(false)
+
+  automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+
+  @@index([automationId])
+}
+
+model Action {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  order        Int
+  automationId String
+  laneId       String @default("0")
+
+  automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  type       ActionType
+
+  @@index([automationId])
+}
+
+model Contact {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  email        String
+  subAccountId String
+
+  subaccount SubAccount @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+  tickets    Ticket[]
+
+  @@index([subAccountId])
+}
+
+model Media {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  type         String?
+  name         String
+  link         String  @unique
+  size         Int?
+  subAccountId String
+
+  subAccount SubAccount @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+
+  @@index([subAccountId])
+}
+
+model Funnel {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name          String
+  description   String?
+  published     Boolean @default(false)
+  subDomainName String? @unique
+  favicon       String? @db.Text
+  subAccountId  String
+  liveProducts  String? @default("[]")
+
+  subAccount  SubAccount   @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+  funnelPages FunnelPage[]
+  className   ClassName[]
+  payments    Payment[]
+
+  @@index([subAccountId])
+}
+
+model ClassName {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name       String
+  color      String
+  funnelId   String
+  customData String? @db.LongText
+
+  funnel Funnel @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+
+  @@index([funnelId])
+}
+
+model FunnelPage {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  pathName     String  @default("")
+  visits       Int     @default(0)
+  content      String? @db.LongText
+  order        Int
+  previewImage String? @db.Text
+  funnelId     String
+
+  funnel Funnel @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+
+  @@index([funnelId])
+}
+
+model AgencySidebarOption {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name     String @default("Menu")
+  link     String @default("#")
+  icon     Icon   @default(info)
+  agencyId String
+
+  agency Agency? @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+
+  @@index([agencyId])
+}
+
+model SubAccountSidebarOption {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String  @default("Menu")
+  link         String  @default("#")
+  subAccountId String?
+
+  icon       Icon        @default(info)
+  subAccount SubAccount? @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+
+  @@index([subAccountId])
+}
+
+model Invitation {
+  id String @id @default(uuid())
+
+  email    String @unique
+  agencyId String
+
+  agency Agency           @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  status InvitationStatus @default(PENDING)
+  role   Role             @default(SUBACCOUNT_USER)
+
+  @@index([agencyId])
+}
+
+model Subscription {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  plan   Plan?
+  price  String?
+  active Boolean @default(false)
+
+  priceId              String
+  customerId           String
+  currentPeriodEndDate DateTime
+  subscritiptionId     String   @unique
+
+  agencyId String? @unique
+  agency   Agency? @relation(fields: [agencyId], references: [id])
+
+  @@index([customerId])
+}
+
+model AddOns {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name     String
+  active   Boolean @default(false)
+  priceId  String  @unique
+  agencyId String?
+
+  agency Agency? @relation(fields: [agencyId], references: [id])
+
+  @@index([agencyId])
+}
+
+model Payment {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  razorpayOrderId   String  @unique
+  razorpayPaymentId String? @unique
+  razorpaySignature String?
+
+  amount   Int // in paise
+  currency String @default("INR")
+
+  platformFee    Int // 1% fee (paise)
+  agencyEarnings Int // amount - fee (paise)
+
+  status String @default("created") // created | paid | failed
+
+  funnelId     String
+  subAccountId String
+  agencyId     String
+
+  funnel     Funnel     @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+  subAccount SubAccount @relation(fields: [subAccountId], references: [id], onDelete: Cascade)
+  agency     Agency     @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+
+  @@index([agencyId])
+  @@index([subAccountId])
+  @@index([funnelId])
+}
+// Add this relation inside the SubAccount model:
+//   aiProjects    AIProject[]
+
+model AIProject {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  description  String?  @db.Text
+  subAccountId String
+
+  files AIProjectFile[]
+
+  @@map("AIProject")
+  @@index([subAccountId])
+}
+
+model AIProjectFile {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  path      String   @db.VarChar(500)
+  content   String   @db.LongText
+  projectId String
+
+  project AIProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("AIProjectFile")
+  @@unique([projectId, path])
+  @@index([projectId])
+}

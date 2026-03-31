@@ -1,24 +1,15 @@
 "use client";
 
-import {
-  useEffect,
-  useRef,
-  useState,
-  useCallback,
-  useTransition,
-} from "react";
-import { useParams, useRouter } from "next/navigation";
+// src/components/modules/ai-builder/chat/ChatPanel.tsx
+
+import { useEffect, useRef, useState, useCallback } from "react";
+import { useParams } from "next/navigation";
 import { Sparkles, Bot } from "lucide-react";
 
 import { useAIBuilderStore } from "../state/ai-builder.store";
 import { useWebContainer } from "../state/use-webcontainer";
 import ChatInput from "./ChatInput";
 import ChatMessage, { type AIMessage } from "./ChatMessage";
-
-// ─────────────────────────────────────────────────────────────
-// CONSTANTS
-// ─────────────────────────────────────────────────────────────
-const POLL_INTERVAL_MS = 2500;
 
 const STARTERS = [
   "SaaS landing page with pricing table and hero",
@@ -29,101 +20,56 @@ const STARTERS = [
   "Portfolio with dark mode",
 ];
 
-// ─────────────────────────────────────────────────────────────
-// CHAT PANEL
-// ─────────────────────────────────────────────────────────────
 const ChatPanel = () => {
   const params = useParams();
-  const router = useRouter();
   const subaccountId = params?.subaccountId as string;
 
-  const { projectId, setProject, setFiles } = useAIBuilderStore();
+  // ✅ FIXED: use individual selectors to avoid infinite re-render
+  const projectId = useAIBuilderStore((s) => s.projectId);
+  const storeFiles = useAIBuilderStore((s) => s.files);
+  const setProject = useAIBuilderStore((s) => s.setProject);
+  const setFiles = useAIBuilderStore((s) => s.setFiles);
+
   const { remount, mountAndRun, isRunning } = useWebContainer();
 
   const [messages, setMessages] = useState<AIMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [, startTransition] = useTransition();
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const hasPendingRef = useRef(false);
-  const prevFileCountRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // ✅ Keep a ref to the latest files so addFileToState doesn't go stale
+  const filesRef = useRef(storeFiles);
+  useEffect(() => { filesRef.current = storeFiles; }, [storeFiles]);
 
-  const routeProjectId = params?.projectId as string | undefined;
-  const effectiveProjectId =
-    projectId ||
-    (routeProjectId && routeProjectId !== "new" ? routeProjectId : null);
-
-  // ── Auto-scroll ──────────────────────────────────────────
+  // Auto scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  // ── Load project files from DB ───────────────────────────
-  const loadProjectFiles = useCallback(
-    async (pid: string) => {
-      try {
-        const res = await fetch(`/api/ai/projects/${pid}`);
-        if (!res.ok) return;
-        const data = await res.json();
-        const newFiles = data?.project?.files ?? [];
-        if (!newFiles.length) return;
-        if (newFiles.length === prevFileCountRef.current) return;
-        prevFileCountRef.current = newFiles.length;
-        setFiles(newFiles);
-        if (isRunning) {
-          remount(newFiles);
-        } else {
-          mountAndRun(newFiles);
-        }
-      } catch (err) {
-        console.error("File load error:", err);
+  // ✅ FIXED: setFiles takes an array, not a callback
+  const addFileToState = useCallback(
+    (file: { path: string; content: string }) => {
+      const prev = filesRef.current;
+      const exists = prev.find((f) => f.path === file.path);
+      if (exists) return;
+
+      const updated = [...prev, { ...file, type: "file" as const }];
+      setFiles(updated); // ✅ pass array directly
+
+      // Mount/remount preview
+      if (isRunning) {
+        remount(updated);
+      } else {
+        mountAndRun(updated);
       }
     },
-    [isRunning, remount, mountAndRun, setFiles]
+    [setFiles, isRunning, remount, mountAndRun]
   );
 
-  // ── Poll messages ────────────────────────────────────────
-  const pollMessages = useCallback(async () => {
-    if (!effectiveProjectId) return;
-    try {
-      const res = await fetch(
-        `/api/ai/messages?projectId=${effectiveProjectId}`
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      const fetched: AIMessage[] = data.messages ?? [];
-
-      startTransition(() => setMessages(fetched));
-
-      const hasPending = fetched.some((m) => m.status === "PENDING");
-
-      if (hasPendingRef.current && !hasPending) {
-        hasPendingRef.current = false;
-        setIsGenerating(false);
-        await loadProjectFiles(effectiveProjectId);
-      }
-
-      hasPendingRef.current = hasPending;
-    } catch (err) {
-      console.error("Poll error:", err);
-    }
-  }, [effectiveProjectId, loadProjectFiles]);
-
-  useEffect(() => {
-    if (!effectiveProjectId) return;
-    pollMessages();
-    pollRef.current = setInterval(pollMessages, POLL_INTERVAL_MS);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [effectiveProjectId, pollMessages]);
-
-  // ── Send message ─────────────────────────────────────────
   const handleSend = useCallback(
     async (prompt: string) => {
       if (!prompt.trim() || isGenerating) return;
 
       setIsGenerating(true);
-      hasPendingRef.current = true;
 
       const optUserId = `opt-user-${Date.now()}`;
       const optAsstId = `opt-asst-${Date.now()}`;
@@ -140,7 +86,7 @@ const ChatPanel = () => {
         {
           id: optAsstId,
           role: "ASSISTANT",
-          content: "Planning and generating your project...",
+          content: "Generating your project...",
           status: "PENDING",
           createdAt: new Date().toISOString(),
         } as AIMessage,
@@ -150,45 +96,83 @@ const ChatPanel = () => {
         const res = await fetch("/api/ai/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            prompt: prompt.trim(),
-            projectId: effectiveProjectId || "new",
-            subaccountId,
-          }),
+          body: JSON.stringify({ prompt, subAccountId: subaccountId }),
         });
 
         if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err?.error || `HTTP ${res.status}`);
+          throw new Error(`API error: ${res.status} ${res.statusText}`);
         }
 
-        const data = await res.json();
-
-        if (data.isNewProject && data.projectId) {
-          setProject(data.projectId);
-          router.replace(
-            `/subaccount/${subaccountId}/ai-builder/${data.projectId}`
-          );
+        // ✅ Grab projectId from header before streaming
+        const newProjectId = res.headers.get("x-project-id");
+        if (newProjectId) {
+          setProject(newProjectId);
         }
-        // Polling picks up the result — nothing else needed here
 
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No stream body");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // Split on double newline (SSE separator)
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? ""; // keep incomplete chunk
+
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data:")) continue;
+
+            try {
+              const json = line.slice(5).trim(); // strip "data: "
+              const data = JSON.parse(json);
+
+              if (data.type === "project") {
+                setProject(data.projectId);
+              }
+
+              if (data.type === "file") {
+                addFileToState(data.file);
+              }
+
+              if (data.type === "done") {
+                setIsGenerating(false);
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === optAsstId
+                      ? { ...m, content: "✅ Project generated! Preview is ready.", status: "DONE" }
+                      : m
+                  )
+                );
+              }
+
+              if (data.type === "error") {
+                throw new Error(data.message || "Generation failed");
+              }
+            } catch (parseErr) {
+              console.warn("[ChatPanel] Failed to parse SSE chunk:", part, parseErr);
+            }
+          }
+        }
       } catch (err) {
+        console.error("[ChatPanel] Error:", err);
         setIsGenerating(false);
-        hasPendingRef.current = false;
         setMessages((prev) =>
           prev.map((m) =>
             m.id === optAsstId
-              ? {
-                  ...m,
-                  content: `Failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-                  status: "ERROR" as const,
-                }
+              ? { ...m, content: "❌ Generation failed. Please try again.", status: "ERROR" }
               : m
           )
         );
       }
     },
-    [effectiveProjectId, subaccountId, isGenerating, setProject, router]
+    [isGenerating, subaccountId, addFileToState, setProject]
   );
 
   const isEmpty = messages.length === 0;
@@ -226,12 +210,8 @@ const ChatPanel = () => {
       {/* Input */}
       <div className="shrink-0 border-t p-3">
         <ChatInput
-          onSend={handleSend}
-          isLoading={isGenerating}
-          disabled={!subaccountId}
-          placeholder={
-            effectiveProjectId ? "Request a change..." : "Describe your app..."
-          }
+          subAccountId={subaccountId}
+          addFileToState={addFileToState}
         />
       </div>
     </div>
@@ -240,9 +220,7 @@ const ChatPanel = () => {
 
 export default ChatPanel;
 
-// ─────────────────────────────────────────────────────────────
-// EMPTY STATE
-// ─────────────────────────────────────────────────────────────
+// ── Empty State ────────────────────────────────────────────────────
 function EmptyState({
   onSelect,
   disabled,
@@ -267,7 +245,7 @@ function EmptyState({
             key={prompt}
             onClick={() => onSelect(prompt)}
             disabled={disabled}
-            className="rounded-lg border bg-muted/30 px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-lg border bg-muted/30 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
           >
             {prompt}
           </button>

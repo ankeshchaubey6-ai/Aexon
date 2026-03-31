@@ -1,8 +1,8 @@
+// src/inngest/functions.ts
+
 import { inngest } from "./client";
-import { planProject } from "@/lib/ai/llm/plan-project";
-import { generateCodeFromAI } from "@/lib/ai/llm/generate-code";
-import { loadBaseTemplate } from "@/lib/ai/template/load-template";
-import { mergeFiles } from "@/lib/ai/engine/merge-files";
+import { planProject } from "@/lib/ai/llm/pipeline"; // ✅ FIXED: correct import
+import { generateFilesInParallel } from "@/lib/ai/llm/deepseek-generator"; // ✅ FIXED: use actual generator
 import { db } from "@/lib/db";
 
 // =========================
@@ -17,22 +17,19 @@ type EventData = {
   prompt: string;
   projectId: string;
   subaccountId: string;
-  isNewProject: boolean;
 };
 
 // =========================
-// FUNCTION (FIXED)
+// INNGEST FUNCTION (FIXED)
 // =========================
 export const aiBuilderFunction = inngest.createFunction(
-  { id: "ai-builder-run" }, // ✅ ONLY ONE CONFIG OBJECT
+  { id: "ai-builder-run" },
+  { event: "ai/build" }, // ✅ FIXED: was missing — this is why nothing triggered
 
   async ({ event, step }: any) => {
-    const { prompt, projectId, subaccountId, isNewProject } =
-      event.data as EventData;
+    const { prompt, projectId, subaccountId } = event.data as EventData;
 
-    // -------------------------
-    // USER MESSAGE
-    // -------------------------
+    // ── Save user message ──────────────────────────────
     await step.run("save-user-message", async () => {
       await db.aIMessage.create({
         data: {
@@ -44,9 +41,7 @@ export const aiBuilderFunction = inngest.createFunction(
       });
     });
 
-    // -------------------------
-    // ASSISTANT PLACEHOLDER
-    // -------------------------
+    // ── Create assistant placeholder ───────────────────
     const assistantMessageId = await step.run(
       "create-assistant-message",
       async () => {
@@ -62,56 +57,38 @@ export const aiBuilderFunction = inngest.createFunction(
       }
     );
 
-    // -------------------------
-    // PLAN
-    // -------------------------
+    // ── Stage 1: Plan ──────────────────────────────────
     const plan = await step.run("plan-project", async () => {
       return planProject(prompt);
     });
 
-    // -------------------------
-    // AI GENERATE
-    // -------------------------
-    const aiFiles: AIFile[] = await step.run(
+    if (!plan) {
+      await step.run("mark-failed", async () => {
+        await db.aIMessage.update({
+          where: { id: assistantMessageId },
+          data: { content: "❌ Planning failed. Please try again.", status: "ERROR" },
+        });
+      });
+      return { projectId, files: 0, error: "Planning failed" };
+    }
+
+    // ── Stage 2: Generate files in parallel ───────────
+    const generatedFiles: AIFile[] = await step.run(
       "generate-code",
       async () => {
-        const input = plan ? JSON.stringify(plan, null, 2) : prompt;
-        return generateCodeFromAI(input);
+        const results = await generateFilesInParallel(plan);
+        return results.map((f) => ({ path: f.path, content: f.content }));
       }
     );
 
-    // -------------------------
-    // LOAD TEMPLATE
-    // -------------------------
-    const baseFiles: AIFile[] = await step.run(
-      "load-template",
-      async () => {
-        return loadBaseTemplate();
-      }
-    );
-
-    // -------------------------
-    // MERGE
-    // -------------------------
-    const finalFiles: AIFile[] = await step.run(
-      "merge-files",
-      async () => {
-        return mergeFiles(baseFiles, aiFiles);
-      }
-    );
-
-    // -------------------------
-    // SAVE FILES
-    // -------------------------
+    // ── Save files to DB ───────────────────────────────
     await step.run("save-files", async () => {
-      if (!finalFiles.length) return;
+      if (!generatedFiles.length) return;
 
-      await db.aIProjectFile.deleteMany({
-        where: { projectId },
-      });
+      await db.aIProjectFile.deleteMany({ where: { projectId } });
 
       await db.aIProjectFile.createMany({
-        data: finalFiles.map((f: AIFile) => ({
+        data: generatedFiles.map((f) => ({
           projectId,
           path: f.path,
           content: f.content,
@@ -119,23 +96,18 @@ export const aiBuilderFunction = inngest.createFunction(
       });
     });
 
-    // -------------------------
-    // UPDATE MESSAGE
-    // -------------------------
+    // ── Update assistant message ───────────────────────
     await step.run("update-message", async () => {
       await db.aIMessage.update({
         where: { id: assistantMessageId },
         data: {
-          content: "🚀 Project ready! Preview starting...",
+          content: `🚀 Done! Generated ${generatedFiles.length} files. Preview is ready.`,
           status: "DONE",
-          filesGenerated: aiFiles.length,
+          filesGenerated: generatedFiles.length,
         },
       });
     });
 
-    return {
-      projectId,
-      files: finalFiles.length,
-    };
+    return { projectId, files: generatedFiles.length };
   }
 );
