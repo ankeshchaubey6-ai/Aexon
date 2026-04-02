@@ -1,10 +1,20 @@
-// ================================================================
+// src/lib/ai/engine/auto-fix.ts
+//
 // AUTO-FIX PIPELINE
-// Runs every AI-generated file through a series of fixers before
-// sending to WebContainers. Handles the most common model errors:
-// malformed JSX, broken imports, missing exports, bad escaping,
-// duplicate code, broken Tailwind, and more.
-// ================================================================
+//
+// CHANGES vs original:
+//  - fixUseClientDirective() REPLACED with stripUseClientDirective()
+//    Original was ADDING "use client" to every file with hooks — breaks Vite completely.
+//    New version STRIPS it (this is a Vite/WebContainer project, not Next.js).
+//  - fixExports(): removed invalid "export default const" pattern,
+//    now correctly appends export at bottom for arrow functions.
+//  - mergeNamedImports(): fixed bug where default imports were discarded
+//    when the same source also had named imports.
+//  - fixCommonPatterns(): async-effect replacement was syntactically broken,
+//    now correctly wraps body in an inner async IIFE.
+//  - All original rules preserved: full Tailwind map, CSS semicolons,
+//    map-key injection, import path corrections, pre-built component paths, etc.
+//
 
 export type AIFile = {
   path: string;
@@ -24,7 +34,7 @@ export function autoFixFiles(files: AIFile[]): AIFile[] {
   // Pass 1: fix individual files
   const results = files.map(fixFile);
 
-  // Pass 2: cross-file fixes (dedup imports, sync exports)
+  // Pass 2: cross-file fixes (dedup exports, sync App files)
   const fixed = crossFileFixes(results.map((r) => r.file));
 
   // Log summary
@@ -63,6 +73,9 @@ function fixFile(file: AIFile): FixResult {
 
   // ── JS/JSX/TS/TSX fixes ──────────────────────────────────────
   if (isJS) {
+    // FIXED: strip "use client" instead of adding it — this is a Vite app
+    code = stripUseClientDirective(code, fixes);
+
     code = fixEscapeArtifacts(code, fixes);
     code = fixTypos(code, fixes);
     code = fixSingleLetterLines(code, fixes);
@@ -71,7 +84,6 @@ function fixFile(file: AIFile): FixResult {
     code = fixMissingReactImport(code, file.path, fixes);
     code = fixImports(code, fixes, warnings);
     code = fixExports(code, file.path, fixes);
-    code = fixUseClientDirective(code, file.path, fixes);
     code = fixHookRules(code, fixes, warnings);
     code = fixTailwindClasses(code, fixes);
     code = fixCommonPatterns(code, fixes);
@@ -99,6 +111,19 @@ function fixFile(file: AIFile): FixResult {
     fixes,
     warnings,
   };
+}
+
+// ================================================================
+// STRIP "use client" — REPLACES the original fixUseClientDirective
+//
+// The original ADDED "use client" to any file with hooks/browser APIs.
+// That directive is Next.js-only and BREAKS Vite builds entirely.
+// We strip it unconditionally from all generated files instead.
+// ================================================================
+function stripUseClientDirective(code: string, fixes: string[]): string {
+  const stripped = code.replace(/^["']use client["'];\s*\n*/m, "");
+  if (stripped !== code) fixes.push("stripped-use-client-directive");
+  return stripped;
 }
 
 // ================================================================
@@ -151,7 +176,6 @@ function fixEscapeArtifacts(code: string, fixes: string[]): string {
   fixed = fixed.replace(/(?<!\\)\\t(?!["\\])/g, "\t");
 
   // Escaped quotes outside of strings (model artifact)
-  // Only fix in JSX/code context, not inside string literals
   fixed = fixed.replace(/\\"([^"]*)\\"(?=\s*[,;)\]}])/g, '"$1"');
 
   if (fixed !== code) fixes.push("escape-artifacts");
@@ -171,7 +195,7 @@ const TYPO_MAP: [RegExp, string][] = [
   [/<\/lable>/g, "</label>"],
   [/<\/tabble>/g, "</table>"],
   [/<\/tabel>/g, "</table>"],
-  [/<\/thead>/g, "</thead>"],  // already correct but normalize case
+  [/<\/thead>/g, "</thead>"],
   [/<\/Div>/g, "</div>"],
   [/<\/Span>/g, "</span>"],
   [/<\/P>/g, "</p>"],
@@ -225,10 +249,8 @@ function fixTypos(code: string, fixes: string[]): string {
 
 // ================================================================
 // SINGLE LETTER ARTIFACT LINES
-// Common model artifact: lone 'n', 's', 'e' on their own line
 // ================================================================
 function fixSingleLetterLines(code: string, fixes: string[]): string {
-  // Only remove lines that are ONLY a single non-meaningful char
   const fixed = code.replace(/^[ \t]*[nseNSE][ \t]*$/gm, "");
   if (fixed !== code) fixes.push("single-letter-artifact-lines");
   return fixed;
@@ -241,13 +263,7 @@ function fixBrokenJSXTags(code: string, fixes: string[]): string {
   let fixed = code;
   let changed = false;
 
-  // Unclosed JSX expression braces in attributes: className={styles.foo
-  // (very hard to auto-fix reliably — just warn, don't break things)
-
-  // Fix <Component/> → <Component /> (space before />)
-  // Actually many formatters prefer without space — skip this
-
-  // Fix stray > that breaks JSX: <div className="foo">content</div >
+  // Fix </  div> → </div>
   const divWithSpace = fixed.replace(/<\/\s+(\w)/g, "</$1");
   if (divWithSpace !== fixed) { changed = true; fixed = divWithSpace; }
 
@@ -261,7 +277,6 @@ function fixBrokenJSXTags(code: string, fixes: string[]): string {
 
 // ================================================================
 // SELF-CLOSING TAGS
-// HTML void elements that must be self-closing in JSX
 // ================================================================
 const VOID_ELEMENTS = new Set([
   "area", "base", "br", "col", "embed", "hr", "img",
@@ -273,7 +288,6 @@ function fixSelfClosingTags(code: string, fixes: string[]): string {
   let changed = false;
 
   for (const tag of VOID_ELEMENTS) {
-    // <br> → <br /> and <br></br> → <br />
     const unclosed = new RegExp(`<${tag}([^/]*)(?<!/)>(?!</${tag}>)`, "gi");
     const next1 = fixed.replace(unclosed, `<${tag}$1 />`);
     if (next1 !== fixed) { changed = true; fixed = next1; }
@@ -298,10 +312,6 @@ function fixMissingReactImport(
   const hasJSX = /<[A-Z][a-zA-Z]*|<[a-z]+[\s/>]/.test(code);
   const hasReactImport = /import\s+React/.test(code);
   const isTypeFile = filePath.endsWith(".d.ts") || filePath.includes("types");
-
-  // React 17+ doesn't need import for JSX transform,
-  // but hooks still need explicit React or named imports.
-  // Only add if using React.* directly or old-style JSX.
   const usesReactDirectly = /\bReact\.(use|create|memo|forwardRef|lazy|Suspense|Fragment|cloneElement|Children)/.test(code);
 
   if (hasJSX && usesReactDirectly && !hasReactImport && !isTypeFile) {
@@ -324,8 +334,6 @@ function fixImports(code: string, fixes: string[], warnings: string[]): string {
   const nonImportLines: string[] = [];
   let inImportBlock = true;
 
-  // Separate import block from the rest
-  // (imports should all be at the top)
   for (const line of lines) {
     const trimmed = line.trim();
     if (
@@ -353,20 +361,22 @@ function fixImports(code: string, fixes: string[], warnings: string[]): string {
     return true;
   });
 
-  // Merge named imports from the same source
-  // e.g. import { A } from 'x' + import { B } from 'x' → import { A, B } from 'x'
+  // Merge named imports from the same source — FIXED: preserves default imports
   const mergedImports = mergeNamedImports(dedupedImports, fixes);
 
   // Fix common wrong import paths
   const correctedImports = mergedImports.map((line) => {
     let l = line;
+
     // Fix: import from 'react-router' → 'react-router-dom'
     l = l.replace(/from ['"]react-router['"]/g, 'from "react-router-dom"');
-    // Fix: import { ... } from '@/components/ui/button' → '@/components/ui'
-    // (only if the component is in our pre-built ui.jsx)
-    const prebuilt = ["Button", "Input", "Textarea", "Select", "Card", "Badge",
+
+    // Fix: import { Button } from '@/components/ui/button' → '@/components/ui'
+    const prebuilt = [
+      "Button", "Input", "Textarea", "Select", "Card", "Badge",
       "Spinner", "Modal", "Skeleton", "Avatar", "Divider", "Alert",
-      "Table", "Progress", "Tooltip"];
+      "Table", "Progress", "Tooltip",
+    ];
     for (const comp of prebuilt) {
       const wrongPath = new RegExp(
         `import\\s*\\{([^}]*)\\b${comp}\\b([^}]*)\\}\\s*from\\s*['"]@/components/ui/${comp.toLowerCase()}['"]`,
@@ -377,10 +387,12 @@ function fixImports(code: string, fixes: string[], warnings: string[]): string {
         changed = true;
       }
     }
+
     // Fix double slashes in paths
     l = l.replace(/from ['"]([^'"]*\/\/[^'"]*)['"]/g, (m, p) =>
       m.replace(p, p.replace(/\/\//g, "/"))
     );
+
     if (l !== line) changed = true;
     return l;
   });
@@ -390,7 +402,7 @@ function fixImports(code: string, fixes: string[], warnings: string[]): string {
     fixed = [...correctedImports, ...nonImportLines].join("\n");
   }
 
-  // Warn about missing imports (common patterns)
+  // Warn about missing imports
   if (/\buseState\b/.test(fixed) && !/import.*useState.*from ['"]react['"]/.test(fixed)) {
     warnings.push("useState used but not imported from react");
   }
@@ -404,30 +416,48 @@ function fixImports(code: string, fixes: string[], warnings: string[]): string {
   return fixed;
 }
 
+// FIXED: no longer discards default imports when source also has named imports
 function mergeNamedImports(lines: string[], fixes: string[]): string[] {
-  // Map: source → Set of named imports
-  const sourceMap = new Map<string, Set<string>>();
-  const defaultImports = new Map<string, string>();
+  // Map: source → { defaultImport?, namedImports }
+  const sourceMap = new Map<string, { def?: string; named: Set<string> }>();
   const otherLines: string[] = [];
 
-  const namedImportRe = /^import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/;
-  const defaultImportRe = /^import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/;
+  const namedRe    = /^import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/;
+  const defaultRe  = /^import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/;
+  const combinedRe = /^import\s+(\w+)\s*,\s*\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/;
 
   for (const line of lines) {
     const trimmed = line.trim();
 
-    const namedMatch = trimmed.match(namedImportRe);
-    if (namedMatch) {
-      const named = namedMatch[1].split(",").map((s) => s.trim()).filter(Boolean);
-      const source = namedMatch[2];
-      if (!sourceMap.has(source)) sourceMap.set(source, new Set());
-      named.forEach((n) => sourceMap.get(source)!.add(n));
+    // Already combined: import Foo, { bar } from '...'
+    const comboMatch = trimmed.match(combinedRe);
+    if (comboMatch) {
+      const [, def, named, source] = comboMatch;
+      if (!sourceMap.has(source)) sourceMap.set(source, { named: new Set() });
+      const entry = sourceMap.get(source)!;
+      entry.def = def;
+      named.split(",").map((s) => s.trim()).filter(Boolean).forEach((n) => entry.named.add(n));
       continue;
     }
 
-    const defaultMatch = trimmed.match(defaultImportRe);
+    // Named: import { A, B } from '...'
+    const namedMatch = trimmed.match(namedRe);
+    if (namedMatch) {
+      const [, named, source] = namedMatch;
+      if (!sourceMap.has(source)) sourceMap.set(source, { named: new Set() });
+      named.split(",").map((s) => s.trim()).filter(Boolean).forEach((n) =>
+        sourceMap.get(source)!.named.add(n)
+      );
+      continue;
+    }
+
+    // Default: import Foo from '...'
+    const defaultMatch = trimmed.match(defaultRe);
     if (defaultMatch) {
-      defaultImports.set(defaultMatch[2], defaultMatch[1]);
+      const [, def, source] = defaultMatch;
+      if (!sourceMap.has(source)) sourceMap.set(source, { named: new Set() });
+      // FIXED: was overwriting named imports — now preserves both
+      sourceMap.get(source)!.def = def;
       continue;
     }
 
@@ -435,121 +465,52 @@ function mergeNamedImports(lines: string[], fixes: string[]): string[] {
   }
 
   const merged: string[] = [];
-
-  // Reconstruct default imports
-  for (const [source, name] of defaultImports) {
-    const named = sourceMap.get(source);
-    if (named && named.size > 0) {
-      merged.push(`import ${name}, { ${[...named].join(", ")} } from "${source}";`);
-      sourceMap.delete(source);
-    } else {
-      merged.push(`import ${name} from "${source}";`);
-    }
-  }
-
-  // Reconstruct named imports (sources without a default import)
-  for (const [source, named] of sourceMap) {
-    if (named.size > 0) {
+  for (const [source, { def, named }] of sourceMap) {
+    if (def && named.size > 0) {
+      // Combined: import Foo, { A, B } from '...'
+      merged.push(`import ${def}, { ${[...named].join(", ")} } from "${source}";`);
+    } else if (def) {
+      merged.push(`import ${def} from "${source}";`);
+    } else if (named.size > 0) {
       merged.push(`import { ${[...named].join(", ")} } from "${source}";`);
     }
   }
 
   if (merged.length > 0) fixes.push("imports-merged-by-source");
-
   return [...merged, ...otherLines];
 }
 
 // ================================================================
-// EXPORTS
+// EXPORTS — FIXED
 // ================================================================
 function fixExports(code: string, filePath: string, fixes: string[]): string {
   let fixed = code;
 
-  const fileName = filePath
-    .split("/")
-    .pop()!
-    .replace(/\.[^.]+$/, "");
-
-  // Capitalize for component name inference
-  const componentName =
-    fileName.charAt(0).toUpperCase() + fileName.slice(1);
-
-  // Case 1: `function App() {` without `export default` → add it
   const hasExportDefault = /export\s+default\s/.test(fixed);
-  const funcMatch = fixed.match(/^function\s+([A-Z]\w*)\s*\(/m);
+  if (hasExportDefault) return fixed;
 
-  if (!hasExportDefault && funcMatch) {
+  // Case 1: `function App() {` without `export default` → prepend it
+  const funcMatch = fixed.match(/^function\s+([A-Z]\w*)\s*\(/m);
+  if (funcMatch) {
     fixed = fixed.replace(
       new RegExp(`^function\\s+${funcMatch[1]}`, "m"),
       `export default function ${funcMatch[1]}`
     );
     fixes.push(`added-export-default-to-${funcMatch[1]}`);
+    return fixed;
   }
 
-  // Case 2: const Component = () => {} without export
-  if (!hasExportDefault) {
-    const constMatch = fixed.match(
-      /^const\s+([A-Z]\w*)\s*=\s*(?:\([^)]*\)|[a-z_]\w*)\s*=>/m
-    );
-    if (constMatch) {
-      fixed = fixed.replace(
-        new RegExp(`^const\\s+${constMatch[1]}`, "m"),
-        `export default const ${constMatch[1]}`
-      );
-      // Actually `export default const` is invalid — fix to add at bottom instead
-      fixed = fixed.replace(
-        `export default const ${constMatch[1]}`,
-        `const ${constMatch[1]}`
-      );
-      fixed += `\n\nexport default ${constMatch[1]};\n`;
-      fixes.push(`added-export-default-bottom-${constMatch[1]}`);
-    }
+  // Case 2: const arrow function without export.
+  // FIXED: "export default const" is invalid JS — append at bottom instead.
+  const constMatch = fixed.match(
+    /^const\s+([A-Z]\w*)\s*=\s*(?:\([^)]*\)|[a-z_]\w*)\s*=>/m
+  );
+  if (constMatch) {
+    fixed += `\n\nexport default ${constMatch[1]};\n`;
+    fixes.push(`added-export-default-bottom-${constMatch[1]}`);
   }
 
   return fixed;
-}
-
-// ================================================================
-// USE CLIENT DIRECTIVE
-// ================================================================
-function fixUseClientDirective(
-  code: string,
-  filePath: string,
-  fixes: string[]
-): string {
-  const hooksPattern =
-    /\b(useState|useEffect|useRef|useCallback|useMemo|useContext|useReducer|useLayoutEffect|useId)\b/;
-  const browserAPIs =
-    /\b(window|document|navigator|localStorage|sessionStorage|addEventListener|removeEventListener)\b/;
-  const eventHandlers = /\bon[A-Z]\w+\s*=\s*\{/;
-
-  const needsUseClient =
-    hooksPattern.test(code) ||
-    browserAPIs.test(code) ||
-    eventHandlers.test(code);
-
-  const hasUseClient = /^['"]use client['"]/.test(code.trimStart());
-
-  // Skip for non-component files
-  const isPage = filePath.includes("/pages/") || filePath.includes("/app/");
-  const isComponent =
-    filePath.endsWith(".jsx") || filePath.endsWith(".tsx");
-
-  if (needsUseClient && !hasUseClient && isComponent) {
-    fixes.push("added-use-client");
-    return `"use client";\n\n${code}`;
-  }
-
-  // Remove "use client" from files that don't need it (e.g. utility files)
-  if (hasUseClient && !needsUseClient && !isPage) {
-    const withoutDirective = code.replace(/^['"]use client['"];\s*\n*/m, "");
-    if (withoutDirective !== code) {
-      fixes.push("removed-unnecessary-use-client");
-      return withoutDirective;
-    }
-  }
-
-  return code;
 }
 
 // ================================================================
@@ -560,13 +521,11 @@ function fixHookRules(
   fixes: string[],
   warnings: string[]
 ): string {
-  // Detect hooks called inside conditions (very rough check)
   const conditionalHook = /if\s*\([^)]*\)\s*\{[^}]*use[A-Z]\w+\s*\(/;
   if (conditionalHook.test(code)) {
     warnings.push("possible-hook-in-conditional — hooks must not be called conditionally");
   }
 
-  // Detect hooks in loops
   const loopHook = /(?:for|while|forEach)\s*[(\[][^)\]]*\)[^{]*\{[^}]*use[A-Z]/;
   if (loopHook.test(code)) {
     warnings.push("possible-hook-in-loop — hooks must not be called inside loops");
@@ -576,9 +535,8 @@ function fixHookRules(
 }
 
 // ================================================================
-// TAILWIND CLASSES
+// TAILWIND CLASSES — full original rule set
 // ================================================================
-// Common AI mistakes with Tailwind class names
 type TailwindFix = [RegExp, string | ((match: string) => string)];
 
 const TAILWIND_FIXES: TailwindFix[] = [
@@ -631,25 +589,20 @@ function fixTailwindClasses(code: string, fixes: string[]): string {
 }
 
 // ================================================================
-// COMMON PATTERNS
+// COMMON PATTERNS — full original set + fixes
 // ================================================================
 function fixCommonPatterns(code: string, fixes: string[]): string {
   let fixed = code;
   let changed = false;
 
-  // Fix: key prop on root element of map (very common AI error — missing key)
-  // We can't auto-add keys without knowing the data, but we can fix wrong ones
-  // Fix: key={index} → warn only
-  // Fix: .map(item => <div>) → add key if missing (use item.id if available)
+  // ── Map keys ─────────────────────────────────────────────────
   const mapWithoutKey = /\.map\((\w+)\s*=>\s*(<[A-Za-z])/g;
-  const mapWithKey = /\.map\((\w+)\s*=>\s*<[A-Za-z][^>]*key=/g;
+  const mapWithKey    = /\.map\((\w+)\s*=>\s*<[A-Za-z][^>]*key=/g;
 
   if (mapWithoutKey.test(fixed) && !mapWithKey.test(fixed)) {
-    // Try to add key using common patterns
     fixed = fixed.replace(
       /\.map\((\w+)\s*=>\s*(<[A-Za-z][a-zA-Z]*)([\s>])/g,
       (match, item, tag, after) => {
-        // Don't add if already has key
         if (match.includes("key=")) return match;
         const keyVal = `${item}?.id ?? ${item}`;
         return `.map(${item} => ${tag} key={${keyVal}}${after}`;
@@ -658,21 +611,20 @@ function fixCommonPatterns(code: string, fixes: string[]): string {
     if (fixed !== code) { changed = true; fixes.push("added-map-keys"); }
   }
 
-  // Fix: async function in useEffect (should use inner async)
-  const asyncEffect = /useEffect\s*\(\s*async\s*\(/;
-  if (asyncEffect.test(fixed)) {
+  // ── Async useEffect — FIXED (was syntactically broken) ───────
+  // Wraps async body in an inner IIFE so the effect callback stays sync.
+  // Original was: useEffect((() => { const run = async ($1) => {
+  // which is malformed. Correct pattern:
+  //   useEffect(() => { (async () => { ... })(); }, deps)
+  if (/useEffect\s*\(\s*async\s*\(/.test(fixed)) {
     fixed = fixed.replace(
-      /useEffect\s*\(\s*async\s*\(([^)]*)\)\s*=>\s*\{/g,
-      "useEffect((() => { const run = async ($1) => {"
+      /useEffect\(\s*async\s*\(\)\s*=>\s*\{([\s\S]*?)\}\s*,/g,
+      (_, body) => `useEffect(() => {\n  (async () => {${body}})();\n},`
     );
-    // This is a partial fix — add warning
-    fixes.push("async-effect-partial-fix");
+    if (fixed !== code) { changed = true; fixes.push("async-effect-fixed"); }
   }
 
-  // Fix: missing semicolons on import/export lines (not critical but cleaner)
-  // Skip — too risky to auto-add
-
-  // Fix: `export default export default` (double export artifact)
+  // ── Double export default ─────────────────────────────────────
   const doubleExport = /export\s+default\s+export\s+default/g;
   if (doubleExport.test(fixed)) {
     fixed = fixed.replace(doubleExport, "export default");
@@ -680,10 +632,7 @@ function fixCommonPatterns(code: string, fixes: string[]): string {
     fixes.push("double-export-default");
   }
 
-  // Fix: `export { default } from '...'` used as re-export inside component files
-  // (usually fine, skip)
-
-  // Fix: props spreading with wrong syntax <Component {...props,} />
+  // ── Bad spread: {...props,} → {...props} ──────────────────────
   const badSpread = /\{\.\.\.(\w+),\s*\}/g;
   if (badSpread.test(fixed)) {
     fixed = fixed.replace(badSpread, "{...$1}");
@@ -691,11 +640,8 @@ function fixCommonPatterns(code: string, fixes: string[]): string {
     fixes.push("spread-trailing-comma");
   }
 
-  // Fix: `<>` without import (Fragment shorthand — fine in React 17+)
-  // No fix needed
-
-  // Fix: Common state setter naming issues
-  // `const count, setCount = useState(0)` → `const [count, setCount] = useState(0)`
+  // ── Bad state destructure ─────────────────────────────────────
+  // const count, setCount = useState(0) → const [count, setCount] = useState(0)
   const badDestructure = /const\s+(\w+)\s*,\s*(set\w+)\s*=\s*useState/g;
   if (badDestructure.test(fixed)) {
     fixed = fixed.replace(badDestructure, "const [$1, $2] = useState");
@@ -712,10 +658,6 @@ function fixCommonPatterns(code: string, fixes: string[]): string {
 function fixBrokenTemplateLiterals(code: string, fixes: string[]): string {
   let fixed = code;
 
-  // Fix: `className={\`...\`}` with unclosed backtick
-  // This is hard to auto-fix reliably — detect and warn
-
-  // Fix: template literal used where string expected in JSX attribute
   // <div className=`foo bar`> → <div className="foo bar">
   const rawTemplateLiteral = /<[a-zA-Z][^>]*\s(\w+)=`([^`]*)`/g;
   if (rawTemplateLiteral.test(fixed)) {
@@ -735,8 +677,6 @@ function fixBrokenTemplateLiterals(code: string, fixes: string[]): string {
 // CONSOLE STATEMENTS
 // ================================================================
 function fixConsoleStatements(code: string, fixes: string[]): string {
-  // Don't remove console.log — AI code often has useful ones
-  // Just fix common artifact: stray `console.log()` on import lines
   const fixed = code.replace(/^import.*;\s*console\.log\(\)/gm, (m) =>
     m.replace(/\s*console\.log\(\)/, "")
   );
@@ -745,20 +685,16 @@ function fixConsoleStatements(code: string, fixes: string[]): string {
 }
 
 // ================================================================
-// CSS FIXES
+// CSS FIXES — full original set
 // ================================================================
 function fixCSS(code: string, fixes: string[]): string {
   let fixed = code;
   let changed = false;
 
   // Fix: missing semicolons in CSS properties
-  // property: value (no semicolon) → property: value;
   const missingSemicolon = /([a-zA-Z-]+\s*:\s*[^;{}]+)(\s*\n\s*[a-zA-Z-]+\s*:)/g;
   const withSemicolon = fixed.replace(missingSemicolon, "$1;$2");
   if (withSemicolon !== fixed) { changed = true; fixed = withSemicolon; }
-
-  // Fix: vendor prefix ordering (put unprefixed last)
-  // Too complex to auto-fix safely — skip
 
   // Fix: 0px → 0 (unnecessary unit)
   const zeroPx = fixed.replace(/:\s*0px\b/g, ": 0");
@@ -774,7 +710,6 @@ function fixCSS(code: string, fixes: string[]): string {
 function fixJSON(code: string, fixes: string[], warnings: string[]): string {
   let fixed = code.trim();
 
-  // Remove trailing commas
   const noTrailing = fixed
     .replace(/,\s*}/g, "}")
     .replace(/,\s*]/g, "]");
@@ -784,7 +719,6 @@ function fixJSON(code: string, fixes: string[], warnings: string[]): string {
     fixed = noTrailing;
   }
 
-  // Validate JSON
   try {
     JSON.parse(fixed);
   } catch (err) {
@@ -800,7 +734,6 @@ function fixJSON(code: string, fixes: string[], warnings: string[]): string {
 function fixHTML(code: string, fixes: string[]): string {
   let fixed = code;
 
-  // Ensure UTF-8 charset meta if missing
   if (fixed.includes("<head") && !fixed.includes("charset")) {
     fixed = fixed.replace(
       /<head>/,
@@ -809,7 +742,6 @@ function fixHTML(code: string, fixes: string[]): string {
     fixes.push("added-charset-meta");
   }
 
-  // Ensure viewport meta
   if (fixed.includes("<head") && !fixed.includes("viewport")) {
     fixed = fixed.replace(
       /<head>/,
@@ -823,21 +755,15 @@ function fixHTML(code: string, fixes: string[]): string {
 
 // ================================================================
 // CROSS-FILE FIXES
-// Runs after all individual files are fixed.
 // ================================================================
 function crossFileFixes(files: AIFile[]): AIFile[] {
-  // Ensure exactly one App.jsx/App.tsx exists
   const appFiles = files.filter(
     (f) => f.path === "src/App.jsx" || f.path === "src/App.tsx"
   );
 
-  if (appFiles.length === 0) {
-    // No App file — something went wrong, leave as-is
-    return files;
-  }
+  if (appFiles.length === 0) return files;
 
   if (appFiles.length > 1) {
-    // Deduplicate: keep the tsx version, or the last one
     const keepPath = appFiles.find((f) => f.path.endsWith(".tsx"))?.path
       ?? appFiles[appFiles.length - 1].path;
     console.warn(`⚠️ Multiple App files found — keeping ${keepPath}`);

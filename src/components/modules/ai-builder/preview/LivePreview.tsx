@@ -24,26 +24,37 @@ const StatusBadge = ({ status }: { status: string }) => {
   );
 };
 
-const LivePreview = memo(() => {
+// projectId prop is used purely to detect project switches and reset boot state.
+const LivePreview = memo(({ projectId }: { projectId: string | null }) => {
   const { files } = useAIBuilderStore();
   const { mountAndRun, writeFiles, remount, url, status } = useWebContainer();
 
   const isBootedRef = useRef(false);
   const prevFilesMapRef = useRef<Map<string, string>>(new Map());
+  // Track which project we last booted for so we reset on switch.
+  const bootedProjectIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!files.length) return;
 
-    // ✅ FIX: don't boot until package.json is present
-    // The planner generates it early but parallel workers may deliver it late.
-    // Attempting npm install without it causes exit code -17 (ENOENT).
     const hasPackageJson = files.some((f) => f.path === "package.json");
     if (!hasPackageJson) {
       console.log("⏳ [LivePreview] Waiting for package.json...");
       return;
     }
 
-    // ── First boot ──────────────────────────────────────────
+    // ── Project switch detected: reset boot state ──────────────────────
+    // When AIWorkspace switches projects it calls resetContainer() which
+    // clears _globalUrl to null. We mirror that here by resetting our refs
+    // whenever the projectId prop changes.
+    if (projectId !== bootedProjectIdRef.current) {
+      console.log(`🔁 [LivePreview] Project changed → ${projectId}, resetting boot state`);
+      isBootedRef.current = false;
+      prevFilesMapRef.current = new Map();
+      bootedProjectIdRef.current = projectId;
+    }
+
+    // ── First boot for this project ────────────────────────────────────
     if (!isBootedRef.current) {
       isBootedRef.current = true;
       prevFilesMapRef.current = new Map(files.map((f) => [f.path, f.content]));
@@ -51,7 +62,7 @@ const LivePreview = memo(() => {
       return;
     }
 
-    // ── Diff and patch ──────────────────────────────────────
+    // ── Diff and patch ─────────────────────────────────────────────────
     const changed: AIFile[] = [];
     const newMap = new Map(files.map((f) => [f.path, f.content]));
 
@@ -60,9 +71,17 @@ const LivePreview = memo(() => {
       if (prev !== file.content) changed.push(file);
     }
 
+    // Also catch newly added files that didn't exist before
+    for (const file of files) {
+      if (!prevFilesMapRef.current.has(file.path)) {
+        if (!changed.find((c) => c.path === file.path)) {
+          changed.push(file);
+        }
+      }
+    }
+
     if (changed.length === 0) return;
 
-    // Structural change → full remount
     const needsRemount = changed.some(
       (f) =>
         f.path === "package.json" ||
@@ -80,13 +99,14 @@ const LivePreview = memo(() => {
     }
 
     prevFilesMapRef.current = newMap;
-  }, [files, mountAndRun, writeFiles, remount]);
+  }, [files, projectId, mountAndRun, writeFiles, remount]);
 
   const handleRefresh = () => {
     if (!files.length) return;
     console.log("🔄 Manual remount triggered");
     isBootedRef.current = false;
     prevFilesMapRef.current = new Map();
+    bootedProjectIdRef.current = null;
     remount(files);
   };
 

@@ -1,56 +1,40 @@
 "use server";
 
 // src/app/(main)/subaccount/[subaccountId]/ai-builder/actions.ts
+// ✅ FIXED: Exports createAIProject and deleteAIProject used by AIBuilderClient.tsx
 
-import { db } from "@/lib/db";
-import { auth } from "@clerk/nextjs/server"; // ✅ no outbound fetch
-import { revalidatePath } from "next/cache";
+import { currentUser } from "@clerk/nextjs/server";
+import {
+  createAIProject as dbCreate,
+  deleteAIProject as dbDelete,
+  getAIProjects,
+} from "@/queries/ai-projects";
 
-export async function createAIProject(
-  subaccountId: string,
-  name: string
-): Promise<{ project: { id: string; name: string; description: string | null; createdAt: Date; updatedAt: Date } } | { error: string }> {
+export { getAIProjects };
+
+export async function createAIProject(subaccountId: string, name: string) {
   try {
-    const { userId } = auth();
-    if (!userId) return { error: "Unauthorized." };
-    if (!name?.trim()) return { error: "Project name is required." };
+    const user = await currentUser();
+    if (!user) return { error: "Unauthorized" };
 
-    const project = await db.aIProject.create({
-      data: {
-        name: name.trim(),
-        description: "",
-        subAccountId: subaccountId,
-      },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
-
-    revalidatePath(`/subaccount/${subaccountId}/ai-builder`);
+    const project = await dbCreate(subaccountId, name);
     return { project };
   } catch (err) {
-    console.error("[createAIProject action]", err);
-    return { error: "Failed to create project. Check server logs." };
+    console.error("[createAIProject]", err);
+    return { error: "Failed to create project" };
   }
 }
 
-export async function deleteAIProject(
-  subaccountId: string,
-  projectId: string
-): Promise<{ success: true } | { error: string }> {
+export async function deleteAIProject(subaccountId: string, projectId: string) {
   try {
-    const { userId } = auth();
-    if (!userId) return { error: "Unauthorized." };
+    const user = await currentUser();
+    if (!user) return { error: "Unauthorized" };
 
-    await db.aIProject.delete({ where: { id: projectId } });
-    revalidatePath(`/subaccount/${subaccountId}/ai-builder`);
+    const result = await dbDelete(subaccountId, projectId);
+    if ("error" in result) return { error: result.error };
     return { success: true };
   } catch (err) {
-    console.error("[deleteAIProject action]", err);
-    return { error: "Failed to delete project." };
+    console.error("[deleteAIProject]", err);
+    return { error: "Failed to delete project" };
   }
 }

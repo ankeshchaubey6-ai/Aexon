@@ -1,13 +1,19 @@
 // src/app/api/ai/chat/route.ts
+// Compatible with stream-pipeline.ts v3.2.
+//
+// provisional=true files (Stage 0 boilerplate + placeholder App.jsx):
+//   → sent to client via SSE so WebContainer boots immediately
+//   → NOT saved to DB (so DB reload never returns an incomplete project)
+//
+// provisional=false files (Stage 7 final batch):
+//   → saved to DB via upsert
+//   → sent to client via SSE
 
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { streamProjectPipeline } from "@/lib/ai/stream/stream-pipeline";
 
-type FileType = {
-  path: string;
-  content: string;
-};
+type FileType = { path: string; content: string; provisional?: boolean };
 
 export async function POST(req: NextRequest) {
   try {
@@ -22,33 +28,25 @@ export async function POST(req: NextRequest) {
     }
 
     const project = await db.aIProject.create({
-      data: {
-        name: prompt.slice(0, 40),
-        subAccountId,
-      },
+      data: { name: prompt.slice(0, 40), subAccountId },
     });
 
     const encoder = new TextEncoder();
-
-    // ✅ FIX 1: track closed state so parallel workers never enqueue after close
     let isClosed = false;
 
     const stream = new ReadableStream({
       async start(controller) {
         const send = (data: object) => {
-          // ✅ Guard every enqueue — parallel workers race to write
           if (isClosed) return;
           try {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-          } catch {
-            // swallow — controller may have closed between the check and enqueue
-          }
+          } catch {}
         };
 
         const close = () => {
           if (isClosed) return;
           isClosed = true;
-          try { controller.close(); } catch { /* already closed */ }
+          try { controller.close(); } catch {}
         };
 
         send({ type: "start" });
@@ -59,26 +57,39 @@ export async function POST(req: NextRequest) {
             prompt,
 
             onFile: async (file: FileType) => {
-              if (isClosed) return; // ✅ skip if already done
+              if (isClosed) return;
 
-              // Save to DB (don't let DB errors crash the stream)
-              try {
-                await db.aIProjectFile.create({
-                  data: {
-                    projectId: project.id,
-                    path: file.path,
-                    content: file.content,
-                  },
-                });
-              } catch (dbErr) {
-                console.error(`❌ DB save failed for ${file.path}:`, dbErr);
+              // Skip DB write for provisional Stage 0 files.
+              // Only persist final Stage 7 files so DB always has complete projects.
+              if (!file.provisional) {
+                try {
+                  await db.aIProjectFile.upsert({
+                    where: {
+                      projectId_path: { projectId: project.id, path: file.path },
+                    },
+                    update: { content: file.content },
+                    create: {
+                      projectId: project.id,
+                      path: file.path,
+                      content: file.content,
+                    },
+                  });
+                } catch (dbErr) {
+                  console.error(`❌ DB upsert failed for ${file.path}:`, dbErr);
+                }
               }
 
-              send({ type: "file", file });
+              // Always send to client regardless of provisional status
+              send({ type: "file", file: { path: file.path, content: file.content } });
             },
 
             onDone: () => {
               send({ type: "done", projectId: project.id });
+              close();
+            },
+
+            onError: (msg) => {
+              send({ type: "error", message: msg });
               close();
             },
           });

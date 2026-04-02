@@ -1,11 +1,12 @@
 // src/app/api/ai/projects/[projectId]/route.ts
+// ✅ FIXED: Reads from DB with RAM re-hydration. Explicit types on callbacks.
 
 import { NextRequest, NextResponse } from "next/server";
 import { currentUser } from "@clerk/nextjs/server";
-import { db } from "@/lib/db";
+import { AIOrchestrator } from "@/lib/ai/engine/ai-orchestrator";
+import { getAIProjectById } from "@/queries/ai-projects";
+import { AIFileNode } from "@/lib/ai/types/ai-project.types";
 
-// GET /api/ai/projects/:projectId
-// Called by ChatPanel after generation completes — loads saved files into the store
 export async function GET(
   _req: NextRequest,
   { params }: { params: { projectId: string } }
@@ -21,72 +22,41 @@ export async function GET(
       return NextResponse.json({ error: "Missing projectId" }, { status: 400 });
     }
 
-    const project = await db.aIProject.findUnique({
-      where: { id: projectId },
-      include: {
-        files: {
-          select: { path: true, content: true },
-          orderBy: { path: "asc" },
-        },
-      },
-    });
+    // Try RAM first
+    try {
+      const files = AIOrchestrator.getProjectFiles(projectId);
+      return NextResponse.json({ project: { id: projectId, files } });
+    } catch {
+      // Fall back to DB
+      const dbProject = await getAIProjectById(projectId);
 
-    if (!project) {
-      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      if (!dbProject) {
+        return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      }
+
+      const files: AIFileNode[] = dbProject.files.map(
+        (f: { path: string; content: string }): AIFileNode => ({
+          path: f.path,
+          content: f.content,
+          type: "file",
+        })
+      );
+
+      // Re-hydrate RAM
+      if (files.length) {
+        AIOrchestrator.setProjectFiles(projectId, files);
+      }
+
+      return NextResponse.json({
+        project: { id: dbProject.id, name: dbProject.name, files },
+      });
     }
-
-    return NextResponse.json({
-      success: true,
-      project: {
-        id: project.id,
-        name: project.name,
-        description: project.description,
-        createdAt: project.createdAt,
-        updatedAt: project.updatedAt,
-        // Normalize to { path, content } — same shape as AIFileNode
-        files: project.files.map((f) => ({ path: f.path, content: f.content })),
-      },
-    });
   } catch (err) {
-    console.error("[GET /api/ai/projects/:projectId]", err);
-    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+    console.error("❌ GET /api/ai/projects/[projectId] error:", err);
+    return NextResponse.json({ error: "Failed to load project" }, { status: 500 });
   }
 }
 
-// PATCH /api/ai/projects/:projectId
-// Optional: rename or update description
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
-  try {
-    const clerkUser = await currentUser();
-    if (!clerkUser) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { projectId } = params;
-    const body = await req.json();
-    const { name, description } = body as { name?: string; description?: string };
-
-    const updated = await db.aIProject.update({
-      where: { id: projectId },
-      data: {
-        ...(name ? { name: name.trim() } : {}),
-        ...(description !== undefined ? { description } : {}),
-        updatedAt: new Date(),
-      },
-      select: { id: true, name: true, description: true, updatedAt: true },
-    });
-
-    return NextResponse.json({ success: true, project: updated });
-  } catch (err) {
-    console.error("[PATCH /api/ai/projects/:projectId]", err);
-    return NextResponse.json({ error: "Internal error" }, { status: 500 });
-  }
-}
-
-// DELETE /api/ai/projects/:projectId
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: { projectId: string } }
@@ -97,12 +67,10 @@ export async function DELETE(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { projectId } = params;
-    await db.aIProject.delete({ where: { id: projectId } });
-
+    AIOrchestrator.deleteProject(params.projectId);
     return NextResponse.json({ success: true });
   } catch (err) {
-    console.error("[DELETE /api/ai/projects/:projectId]", err);
-    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+    console.error("❌ DELETE /api/ai/projects/[projectId] error:", err);
+    return NextResponse.json({ error: "Failed to delete project" }, { status: 500 });
   }
 }

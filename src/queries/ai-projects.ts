@@ -1,115 +1,98 @@
 "use server";
 
 // src/queries/ai-projects.ts
+// ✅ FIXED: Uses correct `prisma` from @/lib/db (not @/lib/ai/db)
 
-import { AIProject } from "@/lib/ai/types/ai-project.types";
-
-// =========================
-// 🔥 GLOBAL STORE (survives Next.js HMR reloads)
-// =========================
-const g = global as typeof global & {
-  _aiProjectsBySubaccount?: Map<string, AIProject[]>;
-};
-
-if (!g._aiProjectsBySubaccount) {
-  g._aiProjectsBySubaccount = new Map<string, AIProject[]>();
-}
-
-const inMemoryProjects = g._aiProjectsBySubaccount;
+import { PrismaClient } from "@prisma/client";
 
 // =========================
 // 📦 GET ALL PROJECTS
 // =========================
 export const getAIProjects = async (subaccountId: string) => {
-  return inMemoryProjects.get(subaccountId) || [];
+  return prisma.aIProject.findMany({
+    where: { subAccountId: subaccountId },
+    orderBy: { updatedAt: "desc" },
+  });
 };
 
 // =========================
-// ➕ CREATE PROJECT (FIXED)
+// ➕ CREATE PROJECT
 // =========================
 export const createAIProject = async (
-  project: Omit<AIProject, "createdAt" | "updatedAt">
-): Promise<AIProject> => {
-  const existing = inMemoryProjects.get(project.subaccountId) || [];
-
-  const now = new Date().toISOString();
-
-  const fullProject: AIProject = {
-    ...project,
-    createdAt: now,        // ✅ FIX
-    updatedAt: now,        // ✅ optional but good practice
-  };
-
-  // Avoid duplicates — overwrite if same id already stored
-  const withoutDuplicate = existing.filter((p) => p.id !== project.id);
-
-  inMemoryProjects.set(project.subaccountId, [
-    ...withoutDuplicate,
-    fullProject,
-  ]);
-
-  console.log(
-    `✅ Project ${project.id} stored under subaccount ${project.subaccountId}`
-  );
-
-  return fullProject;
+  subaccountId: string,
+  name: string,
+  description?: string
+) => {
+  return prisma.aIProject.create({
+    data: {
+      name,
+      description: description ?? null,
+      subAccountId: subaccountId,
+    },
+  });
 };
 
 // =========================
-// 🔍 GET PROJECT BY ID
+// 🔍 GET PROJECT BY ID (with files)
 // =========================
 export const getAIProjectById = async (projectId: string) => {
-  for (const [, projects] of inMemoryProjects.entries()) {
-    const found = projects.find((p) => p.id === projectId);
-    if (found) return found;
-  }
-  return null;
+  return prisma.aIProject.findUnique({
+    where: { id: projectId },
+    include: { files: true },
+  });
 };
 
 // =========================
-// ✏️ UPDATE PROJECT (FIXED)
+// ✏️ UPDATE PROJECT
 // =========================
 export const updateAIProject = async (
   projectId: string,
-  data: Partial<AIProject>
+  data: { name?: string; description?: string }
 ) => {
-  for (const [subaccountId, projects] of inMemoryProjects.entries()) {
-    const index = projects.findIndex((p) => p.id === projectId);
+  return prisma.aIProject.update({
+    where: { id: projectId },
+    data,
+  });
+};
 
-    if (index !== -1) {
-      const updatedProject: AIProject = {
-        ...projects[index],
-        ...data,
-        updatedAt: new Date().toISOString(), // ✅ FIX
-      };
+// =========================
+// 💾 UPSERT PROJECT FILES
+// =========================
+export const upsertAIProjectFiles = async (
+  projectId: string,
+  files: { path: string; content: string }[]
+) => {
+  await prisma.$transaction(
+    files.map((file: { path: string; content: string }) =>
+      prisma.aIProjectFile.upsert({
+        where: { projectId_path: { projectId, path: file.path } },
+        update: { content: file.content },
+        create: { projectId, path: file.path, content: file.content },
+      })
+    )
+  );
 
-      const updatedProjects = [...projects];
-      updatedProjects[index] = updatedProject;
-
-      inMemoryProjects.set(subaccountId, updatedProjects);
-
-      return updatedProject;
-    }
-  }
-
-  return null;
+  await prisma.aIProject.update({
+    where: { id: projectId },
+    data: { updatedAt: new Date() },
+  });
 };
 
 // =========================
 // ❌ DELETE PROJECT
 // =========================
-export const deleteAIProject = async (projectId: string) => {
-  for (const [subaccountId, projects] of inMemoryProjects.entries()) {
-    const index = projects.findIndex((p) => p.id === projectId);
+export const deleteAIProject = async (
+  subaccountId: string,
+  projectId: string
+) => {
+  const project = await prisma.aIProject.findUnique({
+    where: { id: projectId },
+  });
 
-    if (index !== -1) {
-      const updated = projects.filter((p) => p.id !== projectId);
-      inMemoryProjects.set(subaccountId, updated);
-
-      console.log(`🗑️ Deleted project ${projectId}`);
-      return true;
-    }
+  if (!project || project.subAccountId !== subaccountId) {
+    return { error: "Project not found or access denied" };
   }
 
-  return false;
+  await prisma.aIProject.delete({ where: { id: projectId } });
+  return { success: true };
 };

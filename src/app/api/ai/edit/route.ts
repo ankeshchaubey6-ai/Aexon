@@ -1,15 +1,6 @@
 // src/app/api/ai/edit/route.ts
-//
-// POST /api/ai/edit
-// Runs the 3-stage edit pipeline on only the affected files.
-//
-//  Edit Stage 1 — kimi-k2-instruct   → identifies which files change
-//  Edit Stage 2 — deepseek-v3.2      → rewrites them in parallel
-//  Edit Stage 3 — phi-3.5-mini       → validates / fixes edited JSX
-//
-// Unchanged files are merged back from the existing project untouched.
-// The result is hot-patchable via WebContainer HMR.
-//
+// ✅ FIXED: DB fallback when RAM store is empty after restart/cold start.
+// Files are persisted to DB after every edit so they survive restarts.
 
 import { NextRequest, NextResponse } from "next/server";
 import { currentUser } from "@clerk/nextjs/server";
@@ -18,10 +9,12 @@ import { Role } from "@prisma/client";
 import { getAuthUserDetails } from "@/queries/auth";
 import { AIOrchestrator } from "@/lib/ai/engine/ai-orchestrator";
 import { editProjectWithPipeline } from "@/lib/ai/llm/pipeline";
+import { getAIProjectById, upsertAIProjectFiles } from "@/queries/ai-projects";
+import { AIFileNode } from "@/lib/ai/types/ai-project.types";
 
 export async function POST(req: NextRequest) {
   try {
-    // ── Auth ────────────────────────────────────────────────────────────
+    // ── Auth ─────────────────────────────────────────────────────────────
     const clerkUser = await currentUser();
     if (!clerkUser) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -42,7 +35,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Permission check ─────────────────────────────────────────────────
+    // ── Permission check ──────────────────────────────────────────────────
     const authUser = await getAuthUserDetails();
     if (!authUser) {
       return NextResponse.json({ error: "User not found" }, { status: 401 });
@@ -64,32 +57,43 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Load existing files from global store ────────────────────────────
-    let existingFiles;
+    // ── Load files: RAM first, DB fallback ────────────────────────────────
+    let existingFiles: AIFileNode[] = [];
+
     try {
       existingFiles = AIOrchestrator.getProjectFiles(projectId);
+      console.log(`✅ Loaded ${existingFiles.length} files from RAM for ${projectId}`);
     } catch {
-      return NextResponse.json(
-        { error: "Project not found — generate it first" },
-        { status: 404 }
+      console.warn(`⚠️ RAM miss for ${projectId} — loading from DB`);
+
+      const dbProject = await getAIProjectById(projectId);
+
+      if (!dbProject || !dbProject.files.length) {
+        return NextResponse.json(
+          { error: "Project not found — please generate it first" },
+          { status: 404 }
+        );
+      }
+
+      existingFiles = dbProject.files.map(
+        (f: { path: string; content: string }): AIFileNode => ({
+          path: f.path,
+          content: f.content,
+          type: "file",
+        })
       );
+
+      // Re-hydrate RAM so subsequent calls in this server lifetime are fast
+      AIOrchestrator.setProjectFiles(projectId, existingFiles);
+      console.log(`✅ Re-hydrated RAM from DB: ${existingFiles.length} files`);
     }
 
-    if (!existingFiles || existingFiles.length === 0) {
-      return NextResponse.json(
-        { error: "Project has no files" },
-        { status: 404 }
-      );
+    if (!existingFiles.length) {
+      return NextResponse.json({ error: "Project has no files" }, { status: 404 });
     }
 
-    // ── Edit pipeline — 3 stages ──────────────────────────────────────────
-    //  kimi → identifies which files to change
-    //  deepseek → rewrites them in parallel
-    //  phi → validates / fixes edited JSX
-    const updatedFiles = await editProjectWithPipeline(
-      instructions,
-      existingFiles
-    );
+    // ── Edit pipeline ─────────────────────────────────────────────────────
+    const updatedFiles = await editProjectWithPipeline(instructions, existingFiles);
 
     if (!updatedFiles || updatedFiles.length === 0) {
       return NextResponse.json(
@@ -98,16 +102,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Merge back into global store (safe upsert) ───────────────────────
+    // ── Merge back into RAM ───────────────────────────────────────────────
     const merged = AIOrchestrator.updateProjectFiles(projectId, updatedFiles);
 
-    // ── Diff summary for the client ───────────────────────────────────────
+    // ── Persist merged files to DB ────────────────────────────────────────
+    await upsertAIProjectFiles(
+      projectId,
+      merged.map((f: AIFileNode) => ({ path: f.path, content: f.content }))
+    );
+
+    // ── Diff summary ──────────────────────────────────────────────────────
     const editedPaths = updatedFiles
-      .filter((f) => {
+      .filter((f: AIFileNode) => {
         const original = existingFiles.find((e) => e.path === f.path);
         return !original || original.content !== f.content;
       })
-      .map((f) => f.path);
+      .map((f: AIFileNode) => f.path);
 
     return NextResponse.json({
       success: true,
