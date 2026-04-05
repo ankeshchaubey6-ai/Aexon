@@ -1,29 +1,30 @@
 "use server";
 
 // src/queries/ai-projects.ts
-// ✅ FIXED: Uses correct `prisma` from @/lib/db (not @/lib/ai/db)
+//
+// FIX: Was using `prisma` as a bare global (never imported).
+// Now imports `db` from @/lib/db — which is the same PrismaClient instance
+// exported as both `prisma` and `db` from src/lib/db.ts.
 
-import { PrismaClient } from "@prisma/client";
+import { db } from "@/lib/db";
 
-// =========================
-// 📦 GET ALL PROJECTS
-// =========================
+// ── GET ALL PROJECTS ──────────────────────────────────────────────────────────
+
 export const getAIProjects = async (subaccountId: string) => {
-  return prisma.aIProject.findMany({
+  return db.aIProject.findMany({
     where: { subAccountId: subaccountId },
     orderBy: { updatedAt: "desc" },
   });
 };
 
-// =========================
-// ➕ CREATE PROJECT
-// =========================
+// ── CREATE PROJECT ────────────────────────────────────────────────────────────
+
 export const createAIProject = async (
   subaccountId: string,
   name: string,
   description?: string
 ) => {
-  return prisma.aIProject.create({
+  return db.aIProject.create({
     data: {
       name,
       description: description ?? null,
@@ -32,39 +33,41 @@ export const createAIProject = async (
   });
 };
 
-// =========================
-// 🔍 GET PROJECT BY ID (with files)
-// =========================
+// ── GET PROJECT BY ID (with files) ───────────────────────────────────────────
+
 export const getAIProjectById = async (projectId: string) => {
-  return prisma.aIProject.findUnique({
+  return db.aIProject.findUnique({
     where: { id: projectId },
-    include: { files: true },
+    include: {
+      files: {
+        select: { path: true, content: true },
+        orderBy: { path: "asc" },
+      },
+    },
   });
 };
 
-// =========================
-// ✏️ UPDATE PROJECT
-// =========================
+// ── UPDATE PROJECT ────────────────────────────────────────────────────────────
+
 export const updateAIProject = async (
   projectId: string,
   data: { name?: string; description?: string }
 ) => {
-  return prisma.aIProject.update({
+  return db.aIProject.update({
     where: { id: projectId },
     data,
   });
 };
 
-// =========================
-// 💾 UPSERT PROJECT FILES
-// =========================
+// ── UPSERT PROJECT FILES ──────────────────────────────────────────────────────
+
 export const upsertAIProjectFiles = async (
   projectId: string,
   files: { path: string; content: string }[]
 ) => {
-  await prisma.$transaction(
-    files.map((file: { path: string; content: string }) =>
-      prisma.aIProjectFile.upsert({
+  await db.$transaction(
+    files.map((file) =>
+      db.aIProjectFile.upsert({
         where: { projectId_path: { projectId, path: file.path } },
         update: { content: file.content },
         create: { projectId, path: file.path, content: file.content },
@@ -72,27 +75,27 @@ export const upsertAIProjectFiles = async (
     )
   );
 
-  await prisma.aIProject.update({
+  await db.aIProject.update({
     where: { id: projectId },
     data: { updatedAt: new Date() },
   });
 };
 
-// =========================
-// ❌ DELETE PROJECT
-// =========================
+// ── DELETE PROJECT ────────────────────────────────────────────────────────────
+
 export const deleteAIProject = async (
   subaccountId: string,
   projectId: string
 ) => {
-  const project = await prisma.aIProject.findUnique({
+  const project = await db.aIProject.findUnique({
     where: { id: projectId },
+    select: { id: true, subAccountId: true },
   });
 
   if (!project || project.subAccountId !== subaccountId) {
     return { error: "Project not found or access denied" };
   }
 
-  await prisma.aIProject.delete({ where: { id: projectId } });
+  await db.aIProject.delete({ where: { id: projectId } });
   return { success: true };
 };

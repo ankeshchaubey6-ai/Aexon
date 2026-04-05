@@ -1,3 +1,5 @@
+//==================== FILE: src/lib/ai/engine/stack-config.ts ====================
+
 // src/lib/ai/engine/stack-config.ts
 //
 // The pipeline uses Vite + React (not Next.js).
@@ -142,3 +144,5 @@ Fix ONLY syntax errors:
 Do NOT change logic, component names, styling, or functionality.
 Preserve every line that is already valid.
 `.trim();
+
+

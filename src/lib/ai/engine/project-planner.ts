@@ -1,3 +1,5 @@
+//==================== FILE: src/lib/ai/engine/project-planner.ts ====================
+
 // src/lib/ai/engine/project-planner.ts
 //
 // Stage 1 wrapper — delegates to the pipeline's kimi-k2-instruct planner.
@@ -71,3 +73,5 @@ export class ProjectPlanner {
     };
   }
 }
+
+

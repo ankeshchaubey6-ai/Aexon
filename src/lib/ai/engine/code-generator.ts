@@ -1,3 +1,5 @@
+//==================== FILE: src/lib/ai/engine/code-generator.ts ====================
+
 // src/lib/ai/engine/code-generator.ts
 import { AIFileNode, AIProjectPlan } from "../types/ai-project.types";
 
@@ -155,3 +157,5 @@ export default function ${name}() {
     `;
   }
 }
+
+

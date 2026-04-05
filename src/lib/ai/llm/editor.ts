@@ -1,3 +1,5 @@
+//=================== FILE: src/lib/ai/llm/editor.ts ====================
+
 // src/lib/ai/llm/kimi-editor.ts
 import OpenAI from "openai";
 import { AIFileNode } from "../types/ai-project.types";
@@ -110,3 +112,5 @@ Return the COMPLETE updated files array.
     return files;
   }
 }
+
+

@@ -1,3 +1,5 @@
+//==================== FILE: src/lib/ai/llm/glm-enhancer.ts ====================
+
 import OpenAI from "openai";
 import { parseJSON } from "@/lib/ai/utils/parse-json";
 const client = new OpenAI({

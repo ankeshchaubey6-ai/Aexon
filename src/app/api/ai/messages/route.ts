@@ -1,3 +1,5 @@
+//==================== FILE: src/app/api/ai/messages/route.ts ====================
+
 import { NextRequest, NextResponse } from "next/server";
 import { getMessages } from "@/queries/ai-messages";
 
@@ -29,3 +31,5 @@ export async function GET(req: NextRequest) {
     );
   }
 }
+
+

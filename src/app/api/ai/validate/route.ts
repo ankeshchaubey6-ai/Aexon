@@ -1,3 +1,5 @@
+//==================== FILE: src/app/api/ai/validate/route.ts ====================
+
 // src/app/api/ai/validate/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { currentUser } from "@clerk/nextjs/server";
@@ -61,3 +63,5 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+

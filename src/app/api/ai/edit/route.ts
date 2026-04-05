@@ -1,3 +1,5 @@
+//==================== FILE: src/app/api/ai/edit/route.ts ====================
+
 // src/app/api/ai/edit/route.ts
 // ✅ FIXED: DB fallback when RAM store is empty after restart/cold start.
 // Files are persisted to DB after every edit so they survive restarts.
@@ -134,3 +136,5 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+

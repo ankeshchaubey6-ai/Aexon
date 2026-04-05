@@ -1,3 +1,5 @@
+//==================== FILE: src/lib/ai/validation/semantic-validator.ts ====================
+
 // src/lib/ai/validation/semantic-validator.ts
 //
 // Cross-file semantic validation — runs after Stage 3 (codegen) and
@@ -501,3 +503,5 @@ function pass3_propDefaultGuards(files: StreamFile[]): StreamFile[] {
     return changed ? { ...file, content } : file;
   });
 }
+
+

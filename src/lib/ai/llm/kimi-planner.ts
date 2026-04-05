@@ -1,3 +1,5 @@
+//==================== FILE: src/lib/ai/llm/kimi-planner.ts ====================
+
 // src/lib/ai/llm/kimi-planner.ts
 import OpenAI from "openai";
 
@@ -86,3 +88,5 @@ JSON format:
     return null;
   }
 }
+
+

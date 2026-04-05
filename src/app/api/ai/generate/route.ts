@@ -1,14 +1,4 @@
 // src/app/api/ai/generate/route.ts
-//
-// POST /api/ai/generate
-// Runs the full 5-stage pipeline and stores the result in the global store.
-//
-//  Stage 1 — kimi-k2-instruct    → JSON spec
-//  Stage 2 — your code           → split into per-file tasks
-//  Stage 3 — deepseek-v3.2       → parallel codegen (Promise.all)
-//  Stage 4 — phi-3.5-mini        → syntax fix (only broken JSX)
-//  Stage 5 — your code           → assemble + ensureBoilerplate
-//
 
 import { NextRequest, NextResponse } from "next/server";
 import { currentUser } from "@clerk/nextjs/server";
@@ -17,18 +7,18 @@ import { Role } from "@prisma/client";
 import { getAuthUserDetails } from "@/queries/auth";
 import { createAIProject } from "@/queries/ai-projects";
 import { AIOrchestrator } from "@/lib/ai/engine/ai-orchestrator";
-import { generateProjectWithPipeline } from "@/lib/ai/llm/pipeline";
+import { streamProjectPipeline } from "@/lib/ai/stream/stream-pipeline";
 import { AIFileNode } from "@/lib/ai/types/ai-project.types";
 
 export async function POST(req: NextRequest) {
   try {
-    // ── Auth ────────────────────────────────────────────────────────────
+    // ───────────── AUTH ─────────────
     const clerkUser = await currentUser();
     if (!clerkUser) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // ── Body ─────────────────────────────────────────────────────────────
+    // ───────────── BODY ─────────────
     const body = await req.json();
     const { subaccountId, prompt, name } = body as {
       subaccountId?: string;
@@ -43,7 +33,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Permission check ─────────────────────────────────────────────────
+    // ───────────── PERMISSIONS ─────────────
     const authUser = await getAuthUserDetails();
     if (!authUser || !authUser.agency) {
       return NextResponse.json({ error: "User not found" }, { status: 401 });
@@ -57,26 +47,41 @@ export async function POST(req: NextRequest) {
       const hasPermission = authUser.permissions.find(
         (p) => p.access && p.subAccountId === subaccountId
       );
+
       if (!hasPermission) {
         return NextResponse.json({ error: "No access" }, { status: 403 });
       }
     }
 
-    // ── Pipeline — 5 stages ──────────────────────────────────────────────
+    // ───────────── PIPELINE (REAL ENGINE) ─────────────
     const projectId = crypto.randomUUID();
-    let files: AIFileNode[] = [];
+    const files: AIFileNode[] = [];
 
     try {
-      files = await generateProjectWithPipeline(prompt);
+      await streamProjectPipeline(prompt, {
+        onFile: async (file) => {
+          files.push({
+            path: file.path,
+            content: file.content,
+            type: "file",
+          });
+        },
 
-      if (!Array.isArray(files) || files.length === 0) {
+        onDone: () => {},
+
+        onError: (err) => {
+          throw new Error(err);
+        },
+      });
+
+      if (!files.length) {
         throw new Error("Pipeline returned no files");
       }
     } catch (pipelineErr) {
-      console.error("⚠️ Pipeline failed — using hard fallback:", pipelineErr);
+      console.error("⚠️ Pipeline failed — fallback:", pipelineErr);
 
-      // Hard fallback: minimal runnable Vite+React app
-      files = [
+      // FULL SAFE FALLBACK (WORKING VITE APP)
+      files.push(
         {
           path: "package.json",
           content: JSON.stringify(
@@ -86,7 +91,10 @@ export async function POST(req: NextRequest) {
               version: "0.0.0",
               type: "module",
               scripts: { dev: "vite" },
-              dependencies: { react: "^18.2.0", "react-dom": "^18.2.0" },
+              dependencies: {
+                react: "^18.2.0",
+                "react-dom": "^18.2.0",
+              },
               devDependencies: {
                 vite: "^5.0.0",
                 "@vitejs/plugin-react": "^4.0.0",
@@ -99,45 +107,80 @@ export async function POST(req: NextRequest) {
         },
         {
           path: "index.html",
-          content: `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><title>AI App</title></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>`,
-          type: "file",
-        },
-        {
-          path: "src/main.jsx",
-          content: `import React from 'react';\nimport ReactDOM from 'react-dom/client';\nimport App from './App';\nimport './App.css';\nReactDOM.createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);`,
+          content: `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>AI App</title>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>`,
           type: "file",
         },
         {
           path: "vite.config.js",
-          content: `import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\nexport default defineConfig({ plugins: [react()] });`,
+          content: `import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+});`,
+          type: "file",
+        },
+        {
+          path: "src/main.jsx",
+          content: `import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+import './App.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);`,
           type: "file",
         },
         {
           path: "src/App.jsx",
-          content: `import React from 'react';\nimport './App.css';\nexport default function App() { return <div className="app"><h1>Fallback App</h1></div>; }`,
+          content: `import React from 'react';
+import './App.css';
+
+export default function App() {
+  return (
+    <div className="app">
+      <h1>Fallback App</h1>
+    </div>
+  );
+}`,
           type: "file",
         },
         {
           path: "src/App.css",
-          content: `.app { text-align: center; padding: 40px; font-family: sans-serif; }`,
+          content: `.app {
+  text-align: center;
+  padding: 40px;
+  font-family: sans-serif;
+}`,
           type: "file",
-        },
-      ];
+        }
+      );
     }
 
-    // ── Store in global in-memory store ──────────────────────────────────
+    // ───────────── STORE ─────────────
     AIOrchestrator.setProjectFiles(projectId, files);
-    console.log(`✅ Project ${projectId} stored with ${files.length} files`);
 
-    // ── Persist to DB / in-memory project store ───────────────────────────
-    await createAIProject({
-      id: projectId,
-      name: name || prompt.slice(0, 50) || "AI Project",
-      subaccountId,
-      files,
-      createdAt: new Date().toISOString(),
-    });
+  await createAIProject(
+  subaccountId,
+  name || prompt.slice(0, 50) || "AI Project",
+  prompt
+);
 
+    // ───────────── RESPONSE ─────────────
     return NextResponse.json({
       success: true,
       projectId,
@@ -146,6 +189,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     console.error("❌ /api/ai/generate error:", err);
+
     return NextResponse.json(
       { error: "Failed to generate project" },
       { status: 500 }

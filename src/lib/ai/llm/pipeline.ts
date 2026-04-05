@@ -1,496 +1,735 @@
-// src/lib/ai/llm/pipeline.ts
-//
-// Full multi-model pipeline — 5 stages for generation, 3 stages for editing.
-//
-//  Stage 1 — kimi-k2-instruct       → JSON project spec (planner)
-//  Stage 2 — your code              → split spec into per-file tasks
-//  Stage 3 — deepseek-v3.2          → parallel codegen (one call per file)
-//  Stage 4 — phi-3.5-mini-instruct  → syntax fix on broken JSX only
-//  Stage 5 — your code              → assemble + ensureBoilerplate
-//
-//  Edit path (only affected files):
-//  kimi → identifies which files change
-//  deepseek → rewrites them in parallel
-//  phi → validates the edited files
-//
+//==================== FILE: src/lib/ai/llm/pipeline.ts ====================
 
-import OpenAI from "openai";
-import { AIFileNode } from "../types/ai-project.types";
-import {
-  generateFilesInParallel,
-  rewriteFilesWithDeepseek,
-  type ProjectSpec,
-} from "./deepseek-generator";
-import { validateFilesWithPhi } from "./phi-fixer";
+// ════════════════════════════════════════════════════════════════════════════
+// DIFF — src/lib/ai/llm/pipeline.ts
+// Add these imports at the TOP of the file (after existing imports)
+// ════════════════════════════════════════════════════════════════════════════
 
-const client = new OpenAI({
-  apiKey: process.env.NVIDIA_API_KEY!,
-  baseURL: "https://integrate.api.nvidia.com/v1",
-});
+import { deterministicPreProcess } from "@/lib/ai/engine/pre-processor";
+import { runAICritic } from "@/lib/ai/engine/ai-critic";
+import { retryGate } from "@/lib/ai/engine/retry-gate";
 
-// ─────────────────────────────────────────────
-// STAGE 1 — PLANNER  (kimi-k2-instruct)
-// Small output, pure JSON. kimi excels at structured planning.
-// max_tokens: 2000  temp: 0.2
-// ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// DIFF — src/lib/ai/llm/pipeline.ts
+// Find your existing generateProjectWithPipeline function.
+// It currently returns files directly. Wrap it like this:
+// ════════════════════════════════════════════════════════════════════════════
 
-export async function planProject(
-  userPrompt: string
-): Promise<ProjectSpec | null> {
-  console.log("🧠 [STAGE 1] kimi-k2-instruct — planning");
+// BEFORE (your current code, roughly):
+// export async function generateProjectWithPipeline(prompt: string) {
+//   const files = await someInternalGeneration(prompt);
+//   return files;
+// }
 
-  try {
-    const completion = await client.chat.completions.create({
-      model: "moonshotai/kimi-k2-instruct",
-      temperature: 0.2,
-      max_tokens: 2000,
-      messages: [
-        {
-          role: "system",
-          content: `You are a React architect. Return ONLY raw JSON — no markdown, no backticks, no explanation. Start with { and end with }.
+// AFTER — replace the return statement with this block:
+export async function generateProjectWithPipeline_PATCHED(
+  originalFiles: any[] // whatever type your pipeline returns
+): Promise<any[]> {
+  // Stage 2: deterministic pre-processor (zero AI cost)
+  let files = deterministicPreProcess(originalFiles);
+  console.log("✅ [pre-processor] Done");
 
-{
-  "projectName": "PascalCase no spaces",
-  "description": "one sentence",
-  "globalContext": "2-3 sentences: shared design system, color palette, font, spacing used across all files",
-  "files": [
-    {
-      "path": "src/components/Header.jsx",
-      "description": "sticky nav with logo, links, CTA button — glassmorphism style",
-      "dependencies": []
-    }
-  ]
-}
+  // (your existing autoFixFiles + runSemanticValidation stay here, unchanged)
+  // files = autoFixStreamFiles(files);
+  // files = runSemanticValidation(files);
 
-Rules:
-- Always include: src/App.jsx, src/App.css, src/main.jsx, index.html, package.json, vite.config.js
-- One component per file; break every visual section into its own component
-- No react-router-dom; no libraries besides react and react-dom
-- For a landing page: 8–15 component files. For a large site: up to 30 files
-- Each description must be specific enough to code from on its own
-- List ALL files you want generated`,
-        },
-        {
-          role: "user",
-          content: userPrompt,
-        },
-      ],
-    });
+  // Stage 4: AI critic (glm-4.7, fast, cheap)
+  const errors = await runAICritic(files);
 
-    let text = completion.choices[0]?.message?.content || "";
-    text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-
-    if (start === -1 || end === -1) {
-      console.error("❌ [STAGE 1] No JSON object found in planner response");
-      return null;
-    }
-
-    try {
-      const spec = JSON.parse(text.slice(start, end + 1)) as ProjectSpec;
-      console.log(
-        `✅ [STAGE 1] Plan: ${spec.files.length} files — ${spec.files.map((f) => f.path).join(", ")}`
-      );
-      return spec;
-    } catch {
-      // Attempt trailing-comma repair
-      const fixed = text
-        .slice(start, end + 1)
-        .replace(/,(\s*[}\]])/g, "$1");
-      const spec = JSON.parse(fixed) as ProjectSpec;
-      console.log(`✅ [STAGE 1] Plan recovered: ${spec.files.length} files`);
-      return spec;
-    }
-  } catch (err) {
-    console.error("❌ [STAGE 1] Planner failed:", err);
-    return null;
+  // Stage 6: retry gate (devstral, only broken files)
+  if (errors.length > 0) {
+    files = await retryGate(files, errors, 0);
   }
+
+  return files;
 }
 
-// ─────────────────────────────────────────────
-// STAGE 2 — COMPONENT SPLITTER  (your code)
-// Splits the JSON spec into per-file task descriptors.
-// No API call. Validates the spec and normalises paths.
-// ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// DIFF — src/app/api/ai/generate/route.ts
+// Replace the pipeline call block (lines ~80-95) with:
+// ════════════════════════════════════════════════════════════════════════════
 
-function splitPlanIntoTasks(spec: ProjectSpec): ProjectSpec {
-  console.log(`📦 [STAGE 2] Splitting ${spec.files.length} file tasks`);
+/*
+import { deterministicPreProcess } from "@/lib/ai/engine/pre-processor";
+import { runAICritic } from "@/lib/ai/engine/ai-critic";
+import { retryGate } from "@/lib/ai/engine/retry-gate";
 
-  const normalised: ProjectSpec = {
-    ...spec,
-    files: spec.files.map((f) => ({
-      path: f.path.replace(/^\/+/, ""), // strip leading slashes
-      description: f.description || `${f.path} component`,
-      dependencies: Array.isArray(f.dependencies) ? f.dependencies : [],
-    })),
-  };
+// Inside the POST handler, after generateProjectWithPipeline returns:
+files = await generateProjectWithPipeline(prompt);
 
-  console.log(
-    `✅ [STAGE 2] Tasks ready: ${normalised.files.map((f) => f.path).join(", ")}`
-  );
-  return normalised;
+// ← INSERT THESE 4 LINES:
+files = deterministicPreProcess(files);
+const criticErrors = await runAICritic(files);
+if (criticErrors.length > 0) {
+  files = await retryGate(files, criticErrors, 0);
 }
+// END INSERT
 
-// ─────────────────────────────────────────────
-// STAGE 5 — ASSEMBLER  (your code)
-// Merges generated files, writes package.json, vite.config,
-// index.html, auto-builds App.jsx if missing, and — crucially —
-// scans every JSX file for local CSS imports and stubs any that
-// don't exist yet (prevents Vite "does the file exist?" crashes).
-// ─────────────────────────────────────────────
+AIOrchestrator.setProjectFiles(projectId, files);
+*/
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PERMANENT PIPELINE FIXES — drop these into your existing files
+//
+// File targets:
+//   A) src/lib/ai/stream/stream-pipeline.ts  → replace stripMarkdown, stripLLMLeakage
+//   B) src/lib/ai/engine/auto-fix.ts         → replace fixCSS, stripLLMLeakage, fixEscapeArtifacts
+//   C) src/lib/ai/validation/syntax-checker.ts → add new checks
+//
+// Root causes fixed:
+//   1. "= />" corruption     → proxy redacts "=>" as email-like token
+//   2. <REDACTED_EMAIL>      → proxy treats useState('') arg as email token
+//   3. Prose after JSX       → stripLLMLeakage only strips leading lines, not trailing blocks
+//   4. url(none)')           → fixCSS kills url() content but orphans surrounding quotes
+//   5. Truncated output      → no detection of incomplete JSX (missing closing tags)
+//   6. Numeric identifiers   → fixNumericStartImports misses renamed usages in file body
+//   7. Ghost data imports    → semantic validator doesn't check data/hooks files
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// A) src/lib/ai/stream/stream-pipeline.ts
+//    Replace the existing stripMarkdown function with this one.
+//    Add fixRedactedTokens as a new function and call it right after
+//    stripMarkdown in EVERY place LLM output is processed.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * Parse all `import "./Foo.css"` and `import "../bar.css"` statements
- * from a JSX file and resolve them to project-relative paths.
+ * Strip markdown fences + "use client" from raw LLM output.
+ * ONLY strips complete fence lines — never touches content inside strings.
+ */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/^```(?:json|jsx?|javascript|typescript|tsx?|css|html|scss)?\s*\r?\n?/gim, "")
+    .replace(/^```\s*$/gim, "")
+    .replace(/^["']use client["'];\s*\r?\n?/m, "")
+    .trim();
+}
+
+/**
+ * FIX 1 + FIX 2: Undo proxy-level redactions that corrupt valid JS/JSX.
  *
- * e.g. file at "src/components/Header.jsx" importing "./Header.css"
- *      → "src/components/Header.css"
+ * The NVIDIA API gateway (or an intermediate proxy) applies two transforms
+ * that break generated code:
+ *
+ *   a) Arrow operator =>  inside JSX attribute strings gets split into
+ *      "= />" because the proxy tokenises "=>" as a potential email
+ *      address delimiter and inserts a space + slash.
+ *      Pattern: onChange={(e) = /> fn}
+ *
+ *   b) String arguments that look like email addresses (or are empty strings
+ *      adjacent to email-like tokens) get replaced wholesale with the string
+ *      literal "<REDACTED_EMAIL>" or "[REDACTED]".
+ *      Pattern: useState(<REDACTED_EMAIL>)  useCallback(<REDACTED_EMAIL>, [...])
+ *
+ * Call this function immediately after stripMarkdown() on EVERY LLM response
+ * before any other processing.
  */
-function extractLocalCssImports(file: AIFileNode): string[] {
-  // Match: import "./Something.css"  or  import '../Something.css'
-  const importRegex = /import\s+['"](\.[^'"]+\.css)['"]/g;
-  const dir = file.path.split("/").slice(0, -1).join("/");
-  const resolved: string[] = [];
+function fixRedactedTokens(code: string): string {
+  let fixed = code;
 
-  let match: RegExpExecArray | null;
-  while ((match = importRegex.exec(file.content)) !== null) {
-    const rel = match[1]; // e.g. "./Header.css"
+  // ── Fix 1a: "= />" → "=>" inside JSX event handlers ────────────────────
+  // Handles all whitespace variants the proxy might emit:
+  //   (e) = /> fn        →  (e) => fn
+  //   (e) = / > fn       →  (e) => fn
+  //   (e)= />fn          →  (e) => fn
+  //   (event)  =  />     →  (event) =>
+  fixed = fixed.replace(/(\))\s*=\s*\/\s*>/g, "$1 =>");
 
-    // Resolve relative to the file's directory
-    const segments = `${dir}/${rel}`.split("/");
-    const normalised: string[] = [];
-    for (const seg of segments) {
-      if (seg === "..") normalised.pop();
-      else if (seg !== ".") normalised.push(seg);
-    }
-    resolved.push(normalised.join("/"));
-  }
-  return resolved;
+  // ── Fix 1b: standalone "= />" at start of expression (no parens before) ─
+  // Handles: onChange={val = /> setVal}
+  fixed = fixed.replace(/(?<!=\s*)=\s*\/\s*>/g, "=>");
+
+  // ── Fix 2a: <REDACTED_EMAIL> placeholder used as a value ────────────────
+  // Replace with appropriate default based on surrounding context.
+  // Pattern: useState(<REDACTED_EMAIL>) → useState('')
+  // Pattern: useState(<REDACTED_EMAIL>, [...]) → useState(null, [...])
+  fixed = fixed.replace(
+    /\b(useState|useReducer)\s*\(\s*<REDACTED_EMAIL>\s*\)/g,
+    "$1('')"
+  );
+  fixed = fixed.replace(
+    /\b(useState|useReducer)\s*\(\s*<REDACTED_EMAIL>\s*,/g,
+    "$1(null,"
+  );
+
+  // ── Fix 2b: <REDACTED_EMAIL> as a JSX prop value ─────────────────────────
+  // <input value={<REDACTED_EMAIL>} → <input value={''}
+  fixed = fixed.replace(
+    /=\s*\{\s*<REDACTED_EMAIL>\s*\}/g,
+    "={''}"
+  );
+
+  // ── Fix 2c: <REDACTED_EMAIL> as a function argument ──────────────────────
+  // setEmail(<REDACTED_EMAIL>) → setEmail('')
+  fixed = fixed.replace(
+    /\b(\w+)\s*\(\s*<REDACTED_EMAIL>\s*\)/g,
+    "$1('')"
+  );
+
+  // ── Fix 2d: <REDACTED_EMAIL> in variable initialisers ────────────────────
+  // const x = <REDACTED_EMAIL>  →  const x = ''
+  fixed = fixed.replace(
+    /=\s*<REDACTED_EMAIL>\b/g,
+    "= ''"
+  );
+
+  // ── Fix 2e: bracket variants [REDACTED] / [REDACTED_EMAIL] ───────────────
+  fixed = fixed.replace(/\[REDACTED(?:_EMAIL)?\]/g, "''");
+
+  // ── Fix 2f: the string literal "<REDACTED_EMAIL>" inside quotes ──────────
+  // If the proxy wrapped it in quotes, replace with empty string
+  fixed = fixed.replace(/"<REDACTED_EMAIL>"/g, "''");
+  fixed = fixed.replace(/'<REDACTED_EMAIL>'/g, "''");
+
+  return fixed;
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// B-1) src/lib/ai/engine/auto-fix.ts
+//      Replace the existing stripLLMLeakage function entirely.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * Generate a minimal stub CSS for a component based on its name.
- * Produces a scoped class reset + a couple of sensible defaults so
- * the component renders without layout breakage.
+ * FIX 3: Strip ALL LLM prose from generated code files.
+ *
+ * Previous version only stripped lines whose FIRST token matched a prose
+ * pattern, so trailing explanation blocks (appended after the closing brace
+ * of export default) slipped through untouched.
+ *
+ * Strategy (two passes):
+ *   Pass A — Trailing-block truncation:
+ *     Find the last valid code boundary (the line containing "export default"
+ *     OR the last closing brace at column 0) and discard everything after it
+ *     that looks like prose.
+ *
+ *   Pass B — Line-by-line prose removal:
+ *     Remove any line (anywhere in the file) that matches a prose signature.
+ *     This catches inline comments that are actually LLM commentary.
  */
-function stubCss(cssPath: string): string {
-  // Derive a BEM-style root class from the filename, e.g. "header"
-  const name = cssPath
-    .split("/")
-    .pop()!
-    .replace(".css", "")
-    .toLowerCase();
+function stripLLMLeakage(code: string, fixes: string[]): string {
+  let fixed = code;
+  let changed = false;
 
-  return `/* ${cssPath} — auto-generated stub */
-.${name} {
-  box-sizing: border-box;
-}
-
-.${name} * {
-  box-sizing: border-box;
-}
-`;
-}
-
-function ensureBoilerplate(
-  files: AIFileNode[],
-  projectName: string
-): AIFileNode[] {
-  const map = new Map(files.map((f) => [f.path, f]));
-
-  const ensure = (path: string, content: string) => {
-    if (!map.has(path)) {
-      map.set(path, { path, content, type: "file" });
-      console.log(`➕ [STAGE 5] Ensured: ${path}`);
-    }
-  };
-
-  ensure("package.json", makePackageJson(projectName));
-  ensure("index.html", makeIndexHtml(projectName));
-  ensure("src/main.jsx", makeMainJsx());
-  ensure("vite.config.js", makeViteConfig());
-
-  // Auto-build App.jsx from available components if missing
-  if (!map.has("src/App.jsx")) {
-    const components = Array.from(map.keys())
-      .filter(
-        (p) => p.startsWith("src/components/") && p.endsWith(".jsx")
-      )
-      .map((p) => ({
-        name: p.split("/").pop()!.replace(".jsx", ""),
-        importPath: "./" + p.replace("src/", "").replace(".jsx", ""),
-      }));
-
-    const imports = components
-      .map((c) => `import ${c.name} from '${c.importPath}';`)
-      .join("\n");
-    const renders = components
-      .map((c) => `      <${c.name} />`)
-      .join("\n");
-
-    map.set("src/App.jsx", {
-      path: "src/App.jsx",
-      content: `import React from 'react';\nimport './App.css';\n${imports}\n\nfunction App() {\n  return (\n    <div className="app">\n${renders}\n    </div>\n  );\n}\n\nexport default App;`,
-      type: "file",
-    });
-    console.log("➕ [STAGE 5] Auto-built src/App.jsx");
-  }
-
-  if (!map.has("src/App.css")) {
-    map.set("src/App.css", {
-      path: "src/App.css",
-      content: `* { margin: 0; padding: 0; box-sizing: border-box; }\nbody { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }\n.app { min-height: 100vh; }`,
-      type: "file",
-    });
-  }
-
-  // ── CSS stub pass ─────────────────────────────────────────────────────
-  // deepseek freely writes  import "./Header.css"  inside components but
-  // the planner never lists those CSS files in the spec, so they're never
-  // generated → Vite crashes with "does the file exist?".
+  // ── Pass A: Trailing prose block after the last export/closing brace ─────
   //
-  // Solution: scan every JSX file, resolve every local .css import, and
-  // create a stub for any path that isn't already in the map.
-  // Zero extra API calls — pure string processing.
-  const jsxFiles = Array.from(map.values()).filter((f) =>
-    f.path.endsWith(".jsx")
-  );
+  // We look for the last occurrence of:
+  //   export default <Identifier>;        (named re-export)
+  //   export default function/class ...   (inline export)
+  //   }  at column 0 (top-level closing brace)
+  //
+  // Everything after that position which starts with a capital letter followed
+  // by prose-like continuation is stripped.
 
-  let stubbedCount = 0;
-  for (const jsx of jsxFiles) {
-    const cssPaths = extractLocalCssImports(jsx);
-    for (const cssPath of cssPaths) {
-      if (!map.has(cssPath)) {
-        map.set(cssPath, {
-          path: cssPath,
-          content: stubCss(cssPath),
-          type: "file",
-        });
-        stubbedCount++;
-        console.log(`🎨 [STAGE 5] Stubbed missing CSS: ${cssPath}`);
-      }
+  // Find the end of the last export default statement
+  const exportDefaultRe = /^export\s+default\b[^\n]*/gm;
+  let lastExportMatch: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = exportDefaultRe.exec(fixed)) !== null) lastExportMatch = m;
+
+  if (lastExportMatch) {
+    const endOfExport = lastExportMatch.index + lastExportMatch[0].length;
+    const after = fixed.slice(endOfExport);
+
+    // Allow a semicolon and optional newlines, then check if prose follows
+    const proseAfterExport = after.replace(/^[\s;]+/, "");
+
+    const PROSE_STARTERS = [
+      /^I\s+(have|added|removed|updated|fixed|also|changed)/i,
+      /^Note\s+that\b/i,
+      /^Here('s| is)\b/i,
+      /^This\s+(component|file|code|hook|approach|implementation)\b/i,
+      /^The\s+(above|following|component|file|code|function)\b/i,
+      /^In\s+(this|the)\s+(component|file|code|implementation)\b/i,
+      /^Finally[,\s]/i,
+      /^Additionally[,\s]/i,
+      /^Also[,\s]/i,
+      /^Please\s+note\b/i,
+      /^You\s+(can|should|need|may)\b/i,
+      /^To\s+(use|run|install|fix|make)\b/i,
+      /^Let\s+me\s+(know|explain)\b/i,
+      /^Hope\s+(this|that)\b/i,
+      /^Feel\s+free\b/i,
+    ];
+
+    if (PROSE_STARTERS.some((p) => p.test(proseAfterExport))) {
+      // Keep only up to (and including) the export default line + its semicolon
+      const keep = fixed.slice(0, endOfExport).replace(/\s*$/, "") + "\n";
+      fixed = keep;
+      changed = true;
+      fixes.push("stripped-trailing-prose-block");
     }
   }
 
-  if (stubbedCount > 0) {
-    console.log(`🎨 [STAGE 5] Created ${stubbedCount} CSS stub(s) for missing imports`);
-  }
-  // ─────────────────────────────────────────────────────────────────────
+  // ── Pass B: Line-level prose removal ────────────────────────────────────
+  //
+  // Matches lines that start with LLM commentary patterns.
+  // Runs AFTER Pass A so we also clean up any mid-file commentary.
 
-  const result = Array.from(map.values());
-  console.log(`✅ [STAGE 5] Final project: ${result.length} files`);
-  return result;
-}
-
-// ─────────────────────────────────────────────
-// MAIN EXPORT — full 5-stage generation pipeline
-// ─────────────────────────────────────────────
-
-export async function generateProjectWithPipeline(
-  userPrompt: string
-): Promise<AIFileNode[]> {
-  console.log("🚀 ═══════════════════════════════");
-  console.log("🚀 PIPELINE START — GENERATION");
-  console.log("🚀 ═══════════════════════════════");
-
-  // ── Stage 1: Plan ──────────────────────────
-  const rawSpec = await planProject(userPrompt);
-  if (!rawSpec) {
-    console.error("❌ Planning failed — using minimal fallback");
-    return minimalFallback(userPrompt);
-  }
-
-  // ── Stage 2: Split ─────────────────────────
-  const spec = splitPlanIntoTasks(rawSpec);
-
-  // ── Stage 3: Parallel codegen (deepseek) ───
-  const generated = await generateFilesInParallel(spec);
-
-  // ── Stage 4: Validate / fix (phi) ──────────
-  
-const validated = generated;
-  // ── Stage 5: Assemble ──────────────────────
-  const result = ensureBoilerplate(validated, spec.projectName);
-
-  console.log("✅ ═══════════════════════════════");
-  console.log(`✅ PIPELINE DONE — ${result.length} files`);
-  console.log("✅ ═══════════════════════════════");
-
-  return result;
-}
-
-// ─────────────────────────────────────────────
-// EDIT PIPELINE — 3-stage edit path
-// kimi → identifies which files change
-// deepseek → rewrites them in parallel
-// phi → validates edited files
-// ─────────────────────────────────────────────
-
-export async function editProjectWithPipeline(
-  instructions: string,
-  existingFiles: AIFileNode[]
-): Promise<AIFileNode[]> {
-  console.log("✏️ ═══════════════════════════════");
-  console.log("✏️ EDIT PIPELINE START");
-  console.log("✏️ ═══════════════════════════════");
-
-  const fileMap = new Map(existingFiles.map((f) => [f.path, f]));
-
-  // ── Edit Stage 1: kimi identifies affected files ──
-  console.log("🧠 [EDIT 1] kimi-k2-instruct — identifying files to change");
-
-  let pathsToEdit: string[] = [];
-
-  try {
-    const fileList = existingFiles.map((f) => `  - ${f.path}`).join("\n");
-
-    const planCompletion = await client.chat.completions.create({
-      model: "moonshotai/kimi-k2-instruct",
-      temperature: 0.2,
-      max_tokens: 400,
-      messages: [
-        {
-          role: "system",
-          content: `You are a React architect. Return ONLY a raw JSON array of file paths that need to change.
-Example: ["src/App.css", "src/components/Header.jsx"]
-No markdown. No explanation. Start with [ and end with ].`,
-        },
-        {
-          role: "user",
-          content: `Edit request: "${instructions}"\n\nProject files:\n${fileList}`,
-        },
-      ],
-    });
-
-    let planText = planCompletion.choices[0]?.message?.content || "[]";
-    planText = planText
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .trim();
-
-    const s = planText.indexOf("[");
-    const e = planText.lastIndexOf("]");
-    if (s !== -1 && e !== -1) {
-      pathsToEdit = JSON.parse(planText.slice(s, e + 1)) as string[];
-    }
-
-    console.log(`✅ [EDIT 1] kimi identified: ${pathsToEdit.join(", ")}`);
-  } catch (err) {
-    console.warn("⚠️ [EDIT 1] kimi failed — defaulting to App.jsx + App.css:", err);
-    pathsToEdit = existingFiles.some((f) => f.path === "src/App.css")
-      ? ["src/App.css", "src/App.jsx"]
-      : ["src/App.jsx"];
-  }
-
-  if (pathsToEdit.length === 0) {
-    console.warn("⚠️ [EDIT 1] Empty file list — defaulting to App.jsx + App.css");
-    pathsToEdit = ["src/App.jsx", "src/App.css"];
-  }
-
-  // ── Edit Stage 2: deepseek rewrites affected files ──
-  const filesToEdit = pathsToEdit
-    .map((p) => fileMap.get(p))
-    .filter((f): f is AIFileNode => !!f);
-
-  const rewritten = await rewriteFilesWithDeepseek(instructions, filesToEdit);
-
-  // ── Edit Stage 3: phi validates edited files ──
-  const validated = await validateFilesWithPhi(rewritten);
-
-  // Merge back into the full file list (unchanged files stay intact)
-  validated.forEach((f) => fileMap.set(f.path, f));
-
-  const result = Array.from(fileMap.values());
-
-  console.log("✅ ═══════════════════════════════");
-  console.log(`✅ EDIT DONE — ${validated.length} file(s) updated`);
-  console.log("✅ ═══════════════════════════════");
-
-  return result;
-}
-
-// ─────────────────────────────────────────────
-// BOILERPLATE HELPERS
-// ─────────────────────────────────────────────
-
-function makePackageJson(projectName: string): string {
-  return JSON.stringify(
-    {
-      name: projectName.toLowerCase().replace(/\s+/g, "-"),
-      private: true,
-      version: "0.0.0",
-      type: "module",
-      scripts: { dev: "vite" },
-      dependencies: { react: "^18.2.0", "react-dom": "^18.2.0" },
-      devDependencies: {
-        vite: "^5.0.0",
-        "@vitejs/plugin-react": "^4.0.0",
-      },
-    },
-    null,
-    2
-  );
-}
-
-function makeIndexHtml(projectName: string): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>${projectName}</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>`;
-}
-
-function makeMainJsx(): string {
-  return `import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App';
-import './App.css';
-
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);`;
-}
-
-function makeViteConfig(): string {
-  return `import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-
-export default defineConfig({
-  plugins: [react()],
-});`;
-}
-
-function minimalFallback(prompt: string): AIFileNode[] {
-  const name = JSON.stringify(prompt.slice(0, 40) || "AI App");
-  return [
-    {
-      path: "package.json",
-      content: makePackageJson("ai-app"),
-      type: "file",
-    },
-    { path: "index.html", content: makeIndexHtml("AI App"), type: "file" },
-    { path: "src/main.jsx", content: makeMainJsx(), type: "file" },
-    { path: "vite.config.js", content: makeViteConfig(), type: "file" },
-    {
-      path: "src/App.jsx",
-      content: `import React from 'react';\nimport './App.css';\n\nconst TITLE = ${name};\n\nfunction App() {\n  return <div className="app"><h1>{TITLE}</h1></div>;\n}\n\nexport default App;`,
-      type: "file",
-    },
-    {
-      path: "src/App.css",
-      content: `.app { text-align: center; padding: 40px; font-family: sans-serif; }`,
-      type: "file",
-    },
+  const PROSE_LINE_PATTERNS = [
+    /^(In this |Here('s| is) |This (component|file|code)|Note that )/i,
+    /^(I have |I've |I added |I removed |I updated |I fixed |I also )/i,
+    /^(The above |The following |The component |The file )/i,
+    /^(Finally[,\s]|Additionally[,\s]|Also[,\s]|Moreover[,\s])/i,
+    /^(Please note|You can|You should|You need|You may)\b/i,
+    /^(To use|To run|To install|To fix|To make)\b/i,
+    /^(Let me know|Hope this|Feel free)\b/i,
+    // Markdown headers that sneak through
+    /^#{1,6}\s+\w/,
+    // Numbered list items (LLM explanations)
+    /^\d+\.\s+[A-Z]/,
+    // Bullet prose
+    /^[-*•]\s+[A-Z][a-z]{3,}/,
   ];
+
+  const lines = fixed.split("\n");
+  const filtered = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return true; // keep blank lines
+    if (trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) return true;
+    if (PROSE_LINE_PATTERNS.some((p) => p.test(trimmed))) {
+      fixes.push("removed-llm-prose-line");
+      changed = true;
+      return false;
+    }
+    return true;
+  });
+
+  if (changed) fixed = filtered.join("\n");
+  return fixed;
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// B-2) src/lib/ai/engine/auto-fix.ts
+//      Replace the existing fixCSS function entirely.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * FIX 4: CSS fixes — comprehensive url() handling + unclosed strings.
+ *
+ * Previous version replaced the url() inner content with "none" but left
+ * surrounding quotes in place, producing url(none)') — a new parse error.
+ *
+ * This version replaces the ENTIRE url(...) expression (including any
+ * surrounding quotes) with url() to produce a syntactically valid no-op.
+ *
+ * Also handles:
+ *  - Truncated base64 data URLs
+ *  - Unclosed string values in property declarations
+ *  - @import ordering
+ *  - Missing semicolons
+ */
+function fixCSS(code: string, fixes: string[]): string {
+  let fixed = code;
+  let changed = false;
+
+  // ── Fix 4a: Broken url() expressions ─────────────────────────────────────
+  //
+  // Covers all these malformed patterns:
+  //   url(none)')           ← old auto-fix left a dangling quote+paren
+  //   url('data:...[cut]    ← truncated base64 (no closing quote or paren)
+  //   url("data:...[cut]    ← same with double quotes
+  //   url(none)             ← already "fixed" but still malformed value
+  //   url('')')             ← double-closed
+  //
+  // Strategy: match any url(...) where the interior is:
+  //   - a data: URI (always replace — these truncate unpredictably)
+  //   - already "none" but followed by a stray quote or paren
+  //   - an unclosed string (no matching closing quote before ) or newline)
+  //
+  // Replace the whole url(...) expression, including stray trailing
+  // characters, with just: url()
+
+  // Step 1: Kill all data: URIs — they're never safe to keep as-is after
+  // an LLM truncates them.
+  fixed = fixed.replace(/url\(\s*['"]?data:[^)]*\)?['"]?\s*\)?/g, "url()");
+
+  // Step 2: Kill url(none)') and similar stray-quote variants.
+  // Matches: url(anything) optionally followed by ', ", or ) characters
+  fixed = fixed.replace(/url\([^)]*\)\s*['")\s]+(?=['"\s{};]|$)/gm, (match) => {
+    // Only replace if there are trailing quote/paren chars after url(...)
+    if (/url\([^)]*\)\s*['")]+/.test(match)) {
+      changed = true;
+      return "url()";
+    }
+    return match;
+  });
+
+  // Step 3: Fix unclosed url( strings — url(' with no closing ')
+  fixed = fixed.replace(/url\(\s*'[^')\n]*$/gm, "url()");
+  fixed = fixed.replace(/url\(\s*"[^")\n]*$/gm, "url()");
+
+  if (fixed !== code) {
+    changed = true;
+    fixes.push("css-url-expressions-fixed");
+  }
+
+  // ── Fix 4b: Unclosed string values in property declarations ──────────────
+  //
+  // Pattern: background-image: 'unclosed...  (no closing quote before ; or })
+  // Replace the value with 'none' to keep the property syntactically valid.
+  const unclosedStringFixed = fixed.replace(
+    /(:\s*')((?:[^'\n\\]|\\.)*?)$/gm,
+    "$1none'"
+  );
+  const unclosedStringFixed2 = unclosedStringFixed.replace(
+    /(:\s*")((?:[^"\n\\]|\\.)*?)$/gm,
+    '$1none"'
+  );
+  if (unclosedStringFixed2 !== fixed) {
+    fixed = unclosedStringFixed2;
+    changed = true;
+    fixes.push("css-unclosed-strings-fixed");
+  }
+
+  // ── Fix 4c: Move @import rules to the very top ───────────────────────────
+  const importLines: string[] = [];
+  const otherLines: string[] = [];
+  for (const line of fixed.split("\n")) {
+    if (/^\s*@import\s/.test(line)) importLines.push(line);
+    else otherLines.push(line);
+  }
+  if (importLines.length > 0) {
+    const reordered = [...importLines, "", ...otherLines].join("\n");
+    if (reordered !== fixed) {
+      fixed = reordered;
+      changed = true;
+      fixes.push("css-import-moved-to-top");
+    }
+  }
+
+  // ── Fix 4d: Missing semicolons ───────────────────────────────────────────
+  const withSemis = fixed.replace(
+    /([a-zA-Z-]+\s*:\s*[^;{}]+)(\s*\n\s*[a-zA-Z-]+\s*:)/g,
+    "$1;$2"
+  );
+  if (withSemis !== fixed) {
+    fixed = withSemis;
+    changed = true;
+  }
+
+  // ── Fix 4e: 0px → 0 ─────────────────────────────────────────────────────
+  const zeroPx = fixed.replace(/:\s*0px\b/g, ": 0");
+  if (zeroPx !== fixed) {
+    fixed = zeroPx;
+    changed = true;
+  }
+
+  if (changed) fixes.push("css-fixes");
+  return fixed;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// B-3) src/lib/ai/engine/auto-fix.ts
+//      Replace the existing fixEscapeArtifacts function.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * FIX 5: Escape artifacts — extend to also catch proxy-mangled operators.
+ */
+function fixEscapeArtifacts(code: string, fixes: string[]): string {
+  let fixed = code;
+
+  // Original escape fixes
+  fixed = fixed.replace(/\\\\n/g, "\n");
+  fixed = fixed.replace(/\\\\t/g, "\t");
+  fixed = fixed.replace(/\\\\r/g, "");
+  fixed = fixed.replace(/(?<!\\)\\n(?!["\\])/g, "\n");
+  fixed = fixed.replace(/(?<!\\)\\t(?!["\\])/g, "\t");
+  fixed = fixed.replace(/\\"([^"]*)\\"(?=\s*[,;)\]}])/g, '"$1"');
+
+  // Arrow operator variants produced by different proxy implementations:
+  //   = />     (space-slash-gt — most common)
+  //   =/ >     (slash before space)
+  //   =/\>     (escaped gt)
+  fixed = fixed.replace(/(\))\s*=\s*\/\s*>/g, "$1 =>");
+  fixed = fixed.replace(/(\))\s*=\/\s*>/g, "$1 =>");
+
+  // Broken ternary: "? /" → "? " (proxy treating ? as email boundary)
+  // Only fix inside JSX attribute context to avoid breaking regex literals
+  // This is conservative — only matches inside {} JSX expressions
+  // fixed = fixed.replace(/\?\s*\/(?!\*|\/)(\s)/g, "? $1"); // disabled: too risky
+
+  if (fixed !== code) fixes.push("escape-artifacts");
+  return fixed;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// B-4) src/lib/ai/engine/auto-fix.ts
+//      New function — add to the JS fix pipeline after fixEscapeArtifacts.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * FIX 6: Truncation detection and repair.
+ *
+ * LLM output sometimes gets cut mid-file (token limit, network, timeout).
+ * This leaves JSX/JS in a state where:
+ *   - The return() statement is open but never closed
+ *   - The component function body is open but never closed
+ *   - The file ends mid-expression
+ *
+ * Detection heuristics (any one triggers repair):
+ *   - Unbalanced parentheses (open > close by more than 1)
+ *   - Unbalanced braces (open > close by more than 2)
+ *   - Last non-empty line is NOT one of: };  }  );  />  ;
+ *   - File contains "return (" but no matching closing ")"
+ */
+function fixTruncatedOutput(code: string, filePath: string, fixes: string[]): string {
+  if (!filePath.endsWith(".jsx") && !filePath.endsWith(".js")) return code;
+  if (!code || code.length < 50) return code;
+
+  let fixed = code.trim();
+
+  const openParens  = (fixed.match(/\(/g) ?? []).length;
+  const closeParens = (fixed.match(/\)/g) ?? []).length;
+  const openBraces  = (fixed.match(/\{/g) ?? []).length;
+  const closeBraces = (fixed.match(/\}/g) ?? []).length;
+
+  const parenDiff = openParens - closeParens;
+  const braceDiff = openBraces - closeBraces;
+
+  const lines = fixed.split("\n");
+  const lastLine = lines.filter((l) => l.trim()).pop() ?? "";
+  const properEnding = /^[\s})\];,]+$/.test(lastLine) || lastLine.trim().match(/^(};?|};|\/>;?|\);?|,)$/);
+
+  const isTruncated =
+    parenDiff > 1 ||
+    braceDiff > 2 ||
+    (!properEnding && (parenDiff > 0 || braceDiff > 0));
+
+  if (!isTruncated) return fixed;
+
+  // Attempt repair by closing open structures
+  fixes.push(`truncation-repaired:parens+${parenDiff},braces+${braceDiff}`);
+
+  // Close open JSX return statement if needed
+  if (parenDiff > 0) {
+    // If we have an open return (, add closing );
+    if (fixed.includes("return (")) {
+      fixed = fixed + "\n" + ")".repeat(Math.min(parenDiff, 3));
+    } else {
+      fixed = fixed + "\n" + ")".repeat(Math.min(parenDiff, 2));
+    }
+  }
+
+  // Close open function bodies
+  if (braceDiff > 0) {
+    fixed = fixed + "\n" + "}".repeat(Math.min(braceDiff, 3));
+  }
+
+  // Ensure export default exists
+  if (!fixed.includes("export default")) {
+    const compName = filePath.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "Component";
+    const funcMatch = fixed.match(/^(?:export\s+default\s+)?function\s+([A-Z]\w*)/m);
+    const name = funcMatch ? funcMatch[1] : compName;
+    fixed += `\n\nexport default ${name};\n`;
+    fixes.push("added-export-default-after-truncation-repair");
+  }
+
+  return fixed;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// B-5) src/lib/ai/engine/auto-fix.ts
+//      New function — add to the JS fix pipeline.
+//      Also update fixNumericStartImports to also rename usages in the body.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * FIX 7: Fix numeric-start import identifiers AND rename all usages in body.
+ *
+ * Previous version only renamed the import statement itself, leaving the
+ * identifier used in JSX/JS body still starting with a digit.
+ */
+function fixNumericStartImports(code: string, fixes: string[]): string {
+  let fixed = code;
+
+  const importRe = /import\s+(\d\w*)\s+from\s+(['"][^'"]+['"])/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = importRe.exec(fixed)) !== null) {
+    const badIdent = m[1];
+    const safeIdent = `_${badIdent}`;
+    fixes.push(`fixed-numeric-import-identifier:${badIdent}→${safeIdent}`);
+
+    // Replace import declaration
+    fixed = fixed.replace(
+      new RegExp(`import\\s+${badIdent}\\s+from`, "g"),
+      `import ${safeIdent} from`
+    );
+
+    // Replace all usages in the file body (JSX + JS expressions)
+    // Use word boundary to avoid partial matches
+    fixed = fixed.replace(
+      new RegExp(`\\b${badIdent}\\b`, "g"),
+      safeIdent
+    );
+
+    // Reset regex since we modified the string
+    importRe.lastIndex = 0;
+  }
+
+  return fixed;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// C) src/lib/ai/validation/syntax-checker.ts
+//    Add these new checks to the checkSyntax function.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * FIX 8: New syntax checks to add to checkSyntax().
+ *
+ * Add these checks inside the per-file loop in syntax-checker.ts.
+ * Each one pushes to the errors array on detection.
+ */
+function additionalSyntaxChecks(
+  c: string,
+  filePath: string,
+  errors: Array<{ path: string; message: string }>
+): void {
+  // ── Check 1: Proxy arrow corruption (= />) ────────────────────────────────
+  if (/=\s*\/\s*>/.test(c)) {
+    errors.push({
+      path: filePath,
+      message: "Proxy-corrupted arrow operator: '= />' found (should be '=>')",
+    });
+  }
+
+  // ── Check 2: Redacted email placeholder ──────────────────────────────────
+  if (/<REDACTED_EMAIL>|\[REDACTED(?:_EMAIL)?\]/.test(c)) {
+    errors.push({
+      path: filePath,
+      message: "Proxy redaction token found: <REDACTED_EMAIL> or [REDACTED]",
+    });
+  }
+
+  // ── Check 3: Prose appended after export default ─────────────────────────
+  const PROSE_AFTER_EXPORT = [
+    /export\s+default\s+\w+\s*;\s*\n+\s*I\s+(have|added|removed)/i,
+    /export\s+default\s+\w+\s*;\s*\n+\s*Note\s+that/i,
+    /export\s+default\s+\w+\s*;\s*\n+\s*Here('s| is)/i,
+    /export\s+default\s+\w+\s*;\s*\n+\s*This\s+(component|file)/i,
+  ];
+  if (PROSE_AFTER_EXPORT.some((p) => p.test(c))) {
+    errors.push({
+      path: filePath,
+      message: "LLM prose block detected after export default statement",
+    });
+  }
+
+  // ── Check 4: Broken CSS url() ────────────────────────────────────────────
+  if (filePath.endsWith(".css")) {
+    // url(none)') — the specific pattern from the bug report
+    if (/url\([^)]*\)\s*['")]+/.test(c)) {
+      errors.push({
+        path: filePath,
+        message: "Malformed CSS url() expression with trailing quote/paren",
+      });
+    }
+    // Unclosed data URL
+    if (/url\(\s*['"]?data:[^'")]*$/.test(c)) {
+      errors.push({
+        path: filePath,
+        message: "Truncated CSS data URL in url() expression",
+      });
+    }
+  }
+
+  // ── Check 5: Truncated output ─────────────────────────────────────────────
+  if (filePath.endsWith(".jsx")) {
+    const openParens  = (c.match(/\(/g) ?? []).length;
+    const closeParens = (c.match(/\)/g) ?? []).length;
+    const openBraces  = (c.match(/\{/g) ?? []).length;
+    const closeBraces = (c.match(/\}/g) ?? []).length;
+    if (openParens - closeParens > 2) {
+      errors.push({ path: filePath, message: `Likely truncated output: ${openParens - closeParens} unclosed parentheses` });
+    }
+    if (openBraces - closeBraces > 3) {
+      errors.push({ path: filePath, message: `Likely truncated output: ${openBraces - closeBraces} unclosed braces` });
+    }
+  }
+
+  // ── Check 6: Numeric-start identifier still present in body ──────────────
+  if (/\b\d\w*\s*(?:\.|\[|=|\()/.test(c) && /import\s+\d\w*\s+from/.test(c)) {
+    errors.push({
+      path: filePath,
+      message: "Numeric-start identifier used after import (fixNumericStartImports incomplete)",
+    });
+  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// HOW TO WIRE EVERYTHING TOGETHER
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// 1. In stream-pipeline.ts, replace ALL LLM response processing with:
+//
+//      let content = stripMarkdown(res.choices[0]?.message?.content ?? "");
+//      content = fixRedactedTokens(content);   // ← ADD THIS EVERYWHERE
+//      // ...rest of processing...
+//
+//    This must go in EVERY place you call stripMarkdown:
+//      - generateOneFile()
+//      - planProject()
+//      - fixWithPhi()
+//      - refineComponent()
+//      - rewriteFilesWithDeepseek()   (pipeline.ts)
+//      - editProjectWithPipeline()    (pipeline.ts)
+//
+// 2. In auto-fix.ts, update the JS fix pipeline in fixFile():
+//
+//      if (isJS) {
+//        code = stripUseClientDirective(code, fixes);
+//        code = stripLLMLeakage(code, fixes);       // ← REPLACED above
+//        code = fixNumericStartImports(code, fixes); // ← REPLACED above
+//        code = fixTruncatedOutput(code, file.path, fixes); // ← NEW
+//        code = fixDuplicateDeclarations(code, fixes);
+//        // ...rest unchanged...
+//        code = fixEscapeArtifacts(code, fixes);    // ← REPLACED above
+//        // ...rest unchanged...
+//      }
+//
+//      if (isCSS) {
+//        code = fixCSS(code, fixes);                // ← REPLACED above
+//      }
+//
+// 3. In syntax-checker.ts, call additionalSyntaxChecks() at the end
+//    of the per-file loop:
+//
+//      additionalSyntaxChecks(c, file.path, errors);
+//
+// 4. In stream-pipeline.ts CODEGEN_SYSTEM / PLANNER_SYSTEM prompts,
+//    add this to the CRITICAL rules section to reduce source errors:
+//
+//    CSS RULES (CRITICAL):
+//    - NEVER write url() with a data: URI — use short named gradients instead
+//    - All CSS strings must have matching opening AND closing quotes
+//    - url() must be: url() or url(#id) or url('path') — never truncated
+//
+//    JS RULES (CRITICAL):
+//    - Arrow functions must use => not = />
+//    - Never leave explanation text after the closing brace of export default
+//    - Complete the ENTIRE file — never truncate, never write "// rest here"
+//
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CODEGEN_SYSTEM ADDITIONS (paste into your existing CODEGEN_SYSTEM string)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+export const CODEGEN_SYSTEM_ADDITIONS = `
+━━━ OUTPUT INTEGRITY (ABSOLUTE RULES — violations crash the build) ━━━
+- NEVER write explanation text after the final closing brace or export default
+- NEVER truncate output — complete every JSX tag, every function, every file
+- Arrow functions use => not = /> or =/ > (these are proxy artifacts, avoid them)
+- In CSS: NEVER use url() with data: URIs — they truncate. Use gradients instead:
+    background: linear-gradient(135deg, #6366f1, #a855f7)   ← CORRECT
+    background-image: url("data:image/svg+xml,...")          ← FORBIDDEN
+- In CSS: ALL url() must close with exactly one ) and no trailing quotes:
+    url()         ← valid (empty)
+    url('#id')    ← valid
+    url(none)')   ← INVALID (trailing quote+paren)
+- In JSX: NEVER leave a closing tag unmatched — every <div> needs </div>
+- Complete the entire file in one response — no "// TODO", no "// rest here"
+`;
+
+

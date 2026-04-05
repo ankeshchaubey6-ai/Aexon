@@ -1,3 +1,5 @@
+//==================== FILE: src/components/modules/ai-builder/state/ai-builder.store.ts ====================
+
 "use client";
 
 // src/components/modules/ai-builder/state/ai-builder.store.ts
@@ -162,3 +164,5 @@ export const useAIBuilderStore = create<AIBuilderState>((set, get) => ({
       canRedo: false,
     }),
 }));
+
+

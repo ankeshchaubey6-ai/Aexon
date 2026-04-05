@@ -1,33 +1,34 @@
 // src/lib/ai/engine/ai-orchestrator.ts
 
-import {
+import type {
   AIFileNode,
   AIProject,
   AIProjectPlan,
-  AIProjectError,
 } from "../types/ai-project.types";
 
+import { AIProjectError } from "../types/ai-project.types";
 import { CodeGenerator } from "./code-generator";
 import { CodePatcher } from "./code-patcher";
 
-// =========================
-// 🔥 GLOBAL STORE (survives Next.js HMR reloads)
-// =========================
-const g = global as typeof global & {
+// 🔥 GLOBAL STORE (safe for HMR)
+const globalStore = globalThis as unknown as {
   _aiFileStore?: Map<string, AIFileNode[]>;
   _aiMetaStore?: Map<string, AIProject>;
 };
 
-if (!g._aiFileStore) g._aiFileStore = new Map<string, AIFileNode[]>();
-if (!g._aiMetaStore) g._aiMetaStore = new Map<string, AIProject>();
+if (!globalStore._aiFileStore) {
+  globalStore._aiFileStore = new Map<string, AIFileNode[]>();
+}
 
-const inMemoryProjects = g._aiFileStore;
-const projectMetadata = g._aiMetaStore;
+if (!globalStore._aiMetaStore) {
+  globalStore._aiMetaStore = new Map<string, AIProject>();
+}
+
+const inMemoryProjects = globalStore._aiFileStore;
+const projectMetadata = globalStore._aiMetaStore;
 
 export class AIOrchestrator {
-  // =========================
-  // 🚀 CREATE PROJECT (OPTIONAL USE)
-  // =========================
+  // 🚀 CREATE PROJECT (fallback only)
   static createProject(
     projectId: string,
     prompt: string,
@@ -55,7 +56,9 @@ export class AIOrchestrator {
 
       return files;
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message =
+        error instanceof Error ? error.message : String(error);
+
       throw new AIProjectError(
         `Failed to create project: ${message}`,
         "CREATE_FAILED",
@@ -64,9 +67,7 @@ export class AIOrchestrator {
     }
   }
 
-  // =========================
-  // 🔥 DIRECT SET (used by generate route)
-  // =========================
+  // 🔥 MAIN ENTRY USED BY API
   static setProjectFiles(projectId: string, files: AIFileNode[]) {
     if (!Array.isArray(files) || files.length === 0) {
       throw new AIProjectError(
@@ -87,13 +88,10 @@ export class AIOrchestrator {
       updatedAt: new Date().toISOString(),
     });
 
-    console.log(`✅ Project ${projectId} stored with ${files.length} files`);
-    console.log(`📦 Total projects in store: ${inMemoryProjects.size}`);
+    console.log(`✅ Project ${projectId} stored (${files.length} files)`);
   }
 
-  // =========================
-  // ✏️ EDIT PROJECT
-  // =========================
+  // ✏️ EDIT
   static async editProject(
     projectId: string,
     instructions: string,
@@ -104,10 +102,6 @@ export class AIOrchestrator {
       const existing = inMemoryProjects.get(projectId);
 
       if (!existing) {
-        console.error(
-          `❌ Project ${projectId} not found. Store has ${inMemoryProjects.size} projects:`,
-          Array.from(inMemoryProjects.keys())
-        );
         throw new AIProjectError(
           `Project ${projectId} not found`,
           "PROJECT_NOT_FOUND",
@@ -118,24 +112,31 @@ export class AIOrchestrator {
       let updated: AIFileNode[];
 
       if (useAI && aiClient) {
-        updated = await CodePatcher.patchWithAI(existing, instructions, aiClient);
+        updated = await CodePatcher.patchWithAI(
+          existing,
+          instructions,
+          aiClient
+        );
       } else {
         updated = CodePatcher.patch(existing, instructions);
       }
 
       inMemoryProjects.set(projectId, updated);
 
-      const metadata = projectMetadata.get(projectId);
-      if (metadata) {
-        metadata.updatedAt = new Date().toISOString();
-        metadata.files = updated;
-        projectMetadata.set(projectId, metadata);
+      const meta = projectMetadata.get(projectId);
+      if (meta) {
+        meta.updatedAt = new Date().toISOString();
+        meta.files = updated;
+        projectMetadata.set(projectId, meta);
       }
 
       return updated;
     } catch (error: unknown) {
       if (error instanceof AIProjectError) throw error;
-      const message = error instanceof Error ? error.message : String(error);
+
+      const message =
+        error instanceof Error ? error.message : String(error);
+
       throw new AIProjectError(
         `Failed to edit project: ${message}`,
         "EDIT_FAILED",
@@ -144,68 +145,49 @@ export class AIOrchestrator {
     }
   }
 
-  // =========================
-  // 🔄 UPDATE FILES (SAFE MERGE)
-  // =========================
+  // 🔄 MERGE FILES
   static updateProjectFiles(
     projectId: string,
     newFiles: AIFileNode[]
   ): AIFileNode[] {
-    try {
-      const existing = inMemoryProjects.get(projectId);
+    const existing = inMemoryProjects.get(projectId);
 
-      if (!existing) {
-        throw new AIProjectError(
-          `Project ${projectId} not found`,
-          "PROJECT_NOT_FOUND",
-          404
-        );
-      }
-
-      const fileMap = new Map<string, AIFileNode>();
-
-      existing.forEach((f) => fileMap.set(f.path, f));
-      newFiles.forEach((f) => {
-        if (f.path && typeof f.content === "string") {
-          fileMap.set(f.path, f);
-        }
-      });
-
-      const updated = Array.from(fileMap.values());
-
-      inMemoryProjects.set(projectId, updated);
-
-      const metadata = projectMetadata.get(projectId);
-      if (metadata) {
-        metadata.updatedAt = new Date().toISOString();
-        metadata.files = updated;
-        projectMetadata.set(projectId, metadata);
-      }
-
-      console.log(`✅ Updated project ${projectId} with ${newFiles.length} new files`);
-      return updated;
-    } catch (error: unknown) {
-      if (error instanceof AIProjectError) throw error;
-      const message = error instanceof Error ? error.message : String(error);
+    if (!existing) {
       throw new AIProjectError(
-        `Failed to update files: ${message}`,
-        "UPDATE_FAILED",
-        500
+        `Project ${projectId} not found`,
+        "PROJECT_NOT_FOUND",
+        404
       );
     }
+
+    const map = new Map<string, AIFileNode>();
+
+    existing.forEach((f) => map.set(f.path, f));
+    newFiles.forEach((f) => {
+      if (f.path && typeof f.content === "string") {
+        map.set(f.path, f);
+      }
+    });
+
+    const updated = Array.from(map.values());
+
+    inMemoryProjects.set(projectId, updated);
+
+    const meta = projectMetadata.get(projectId);
+    if (meta) {
+      meta.updatedAt = new Date().toISOString();
+      meta.files = updated;
+      projectMetadata.set(projectId, meta);
+    }
+
+    return updated;
   }
 
-  // =========================
   // 📂 GET FILES
-  // =========================
   static getProjectFiles(projectId: string): AIFileNode[] {
     const files = inMemoryProjects.get(projectId);
 
     if (!files) {
-      console.error(
-        `❌ Project ${projectId} not found. Store has ${inMemoryProjects.size} projects:`,
-        Array.from(inMemoryProjects.keys())
-      );
       throw new AIProjectError(
         `Project ${projectId} not found`,
         "PROJECT_NOT_FOUND",
@@ -216,9 +198,7 @@ export class AIOrchestrator {
     return files;
   }
 
-  // =========================
-  // 📊 METADATA
-  // =========================
+  // 📊 META
   static getProjectMetadata(projectId: string): AIProject | undefined {
     return projectMetadata.get(projectId);
   }
@@ -227,36 +207,13 @@ export class AIOrchestrator {
     return Array.from(projectMetadata.values());
   }
 
-  // =========================
   // ❌ DELETE
-  // =========================
   static deleteProject(projectId: string): boolean {
-    const deleted = inMemoryProjects.delete(projectId);
     projectMetadata.delete(projectId);
-    return deleted;
+    return inMemoryProjects.delete(projectId);
   }
 
-  // =========================
-  // ✅ VALIDATE
-  // =========================
-  static validateProject(files: AIFileNode[]): boolean {
-    const validation = CodePatcher.validateFiles(files);
-
-    if (!validation.isValid) {
-      console.error("❌ Validation failed:", validation.errors);
-      return false;
-    }
-
-    if (validation.warnings.length > 0) {
-      console.warn("⚠️ Warnings:", validation.warnings);
-    }
-
-    return true;
-  }
-
-  // =========================
   // 📈 STATS
-  // =========================
   static getProjectStats(projectId: string) {
     const files = this.getProjectFiles(projectId);
 
