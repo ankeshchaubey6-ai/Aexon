@@ -1,11 +1,28 @@
 // src/lib/ai/types/ai-project.types.ts
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔥 CORE FILE TYPE (THIS WAS MISSING — REQUIRED BY ENGINE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type AIFile = {
+  path: string;
+  content: string;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 📁 FILE TREE STRUCTURE
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface AIFileNode {
   path: string;
   content: string;
-  type?: "file" | "folder";  // Made optional for backward compatibility
-  children?: AIFileNode[];    // For folder support
+  type?: "file" | "folder";
+  children?: AIFileNode[];
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧠 PROJECT TYPES
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface AIProject {
   id: string;
@@ -13,21 +30,25 @@ export interface AIProject {
   subaccountId: string;
   files: AIFileNode[];
   createdAt: string;
-  updatedAt?: string;         // Optional for projects that haven't been updated
+  updatedAt?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 📦 REQUEST PAYLOADS
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface AIGeneratePayload {
   subaccountId: string;
   prompt: string;
-  model?: string;             // Optional, defaults to configured model
-  name?: string;              // Optional project name
+  model?: string;
+  name?: string;
 }
 
 export interface AIEditPayload {
   subaccountId: string;
   projectId: string;
   instructions: string;
-  model?: string;             // Optional model override
+  model?: string;
 }
 
 export interface AIPreviewPayload {
@@ -35,7 +56,10 @@ export interface AIPreviewPayload {
   projectId: string;
 }
 
-// Project planning types
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧠 PROJECT PLANNING
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface AIProjectPlan {
   projectName: string;
   description: string;
@@ -50,7 +74,10 @@ export interface AIProjectPlan {
   dependencies?: string[];
 }
 
-// Generation response types
+// ─────────────────────────────────────────────────────────────────────────────
+// 📤 RESPONSES
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface AIGenerationResponse {
   success: boolean;
   projectId?: string;
@@ -59,7 +86,6 @@ export interface AIGenerationResponse {
   fileCount?: number;
 }
 
-// Edit response types
 export interface AIEditResponse {
   success: boolean;
   projectId?: string;
@@ -72,28 +98,36 @@ export interface AIEditResponse {
   };
 }
 
-// Preview response types
 export interface AIPreviewResponse {
   success: boolean;
   url?: string;
   error?: string;
 }
 
-// Database types (for Prisma compatibility)
+// ─────────────────────────────────────────────────────────────────────────────
+// 🗄️ DATABASE TYPES
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface DBAIProject {
   id: string;
   name: string;
   subaccountId: string;
-  files: any; // JSON stored in database
+  files: any;
   createdAt: Date;
   updatedAt: Date;
 }
 
-// Utility types
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧰 UTILITY TYPES
+// ─────────────────────────────────────────────────────────────────────────────
+
 export type AIFileMap = Map<string, AIFileNode>;
 export type AIProjectMap = Map<string, AIProject>;
 
-// Error types
+// ─────────────────────────────────────────────────────────────────────────────
+// ❌ ERROR HANDLING
+// ─────────────────────────────────────────────────────────────────────────────
+
 export class AIProjectError extends Error {
   constructor(
     message: string,
@@ -105,14 +139,20 @@ export class AIProjectError extends Error {
   }
 }
 
-// Validation types
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ VALIDATION TYPES
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface AIFileValidation {
   isValid: boolean;
   errors: string[];
   warnings: string[];
 }
 
-// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+// ⚙️ CONSTANTS
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const ALLOWED_FILE_EXTENSIONS = [
   ".js",
   ".jsx",

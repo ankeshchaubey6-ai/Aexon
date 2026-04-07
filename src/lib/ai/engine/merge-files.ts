@@ -1,58 +1,51 @@
-export type AIFile = {
-  path: string;
-  content: string;
-};
-
+import { AIFile } from "@/lib/ai/types/ai-project.types";
 export function mergeFiles(baseFiles: AIFile[], aiFiles: AIFile[]): AIFile[] {
-  const fileMap = new Map<string, string>();
+  const map = new Map<string, AIFile>();
 
-  // STEP 1: Load base template
-  for (const file of baseFiles) {
-    fileMap.set(file.path, file.content);
+  // Load base
+  for (const f of baseFiles) {
+    map.set(f.path, { ...f });
   }
 
-  // STEP 2: Overlay AI files
-  for (const file of aiFiles) {
-    if (file.path === "package.json") {
-      // Smart merge: keep base deps, add AI extra deps
+  for (const ai of aiFiles) {
+    if (ai.path === "package.json") {
       try {
-        const basePkg = JSON.parse(fileMap.get("package.json") || "{}");
-        const aiPkg = JSON.parse(file.content);
+        const basePkg = JSON.parse(map.get("package.json")?.content || "{}");
+        const aiPkg = JSON.parse(ai.content);
 
         const merged = {
           ...basePkg,
           ...aiPkg,
-          // Always preserve name/version/type from base
           name: basePkg.name,
           version: basePkg.version,
           type: basePkg.type,
-          // Merge scripts (base wins for dev/build)
           scripts: { ...aiPkg.scripts, ...basePkg.scripts },
-          // AI deps extend base deps
           dependencies: { ...basePkg.dependencies, ...aiPkg.dependencies },
           devDependencies: { ...basePkg.devDependencies, ...aiPkg.devDependencies },
         };
 
-        fileMap.set("package.json", JSON.stringify(merged, null, 2));
-      } catch (err) {
-        console.warn("⚠️ package.json merge failed, using base version");
-        // Keep base package.json — safer than broken AI version
+        map.set("package.json", {
+          path: "package.json",
+          content: JSON.stringify(merged, null, 2),
+        });
+      } catch {
+        console.warn("⚠️ package.json merge failed");
       }
       continue;
     }
 
-    // For all other files: AI wins
-    fileMap.set(file.path, file.content);
+    const existing = map.get(ai.path);
+
+    // ✅ SMART MERGE (not overwrite)
+    if (existing && existing.content !== ai.content) {
+      map.set(ai.path, {
+        path: ai.path,
+        content: ai.content, // AI wins but tracked
+      });
+    } else {
+      map.set(ai.path, ai);
+    }
   }
 
-  const result = Array.from(fileMap.entries()).map(([path, content]) => ({
-    path,
-    content,
-  }));
-
-  console.log(
-    `🔀 Merged: ${baseFiles.length} base + ${aiFiles.length} AI = ${result.length} total files`
-  );
-
-  return result;
+  return Array.from(map.values());
 }

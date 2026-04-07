@@ -1,16 +1,30 @@
 "use server";
 
 // src/queries/ai-projects.ts
-//
-// FIX: Was using `prisma` as a bare global (never imported).
-// Now imports `db` from @/lib/db — which is the same PrismaClient instance
-// exported as both `prisma` and `db` from src/lib/db.ts.
 
 import { db } from "@/lib/db";
+
+// ── TYPES ─────────────────────────────────────────────────────────────────────
+
+type ProjectUpdateInput = {
+  name?: string;
+  description?: string;
+};
+
+type ProjectFileInput = {
+  path: string;
+  content: string;
+};
+
+type DeleteResult =
+  | { success: true }
+  | { error: string };
 
 // ── GET ALL PROJECTS ──────────────────────────────────────────────────────────
 
 export const getAIProjects = async (subaccountId: string) => {
+  if (!subaccountId) throw new Error("subaccountId is required");
+
   return db.aIProject.findMany({
     where: { subAccountId: subaccountId },
     orderBy: { updatedAt: "desc" },
@@ -24,6 +38,9 @@ export const createAIProject = async (
   name: string,
   description?: string
 ) => {
+  if (!subaccountId) throw new Error("subaccountId is required");
+  if (!name) throw new Error("Project name is required");
+
   return db.aIProject.create({
     data: {
       name,
@@ -36,7 +53,9 @@ export const createAIProject = async (
 // ── GET PROJECT BY ID (with files) ───────────────────────────────────────────
 
 export const getAIProjectById = async (projectId: string) => {
-  return db.aIProject.findUnique({
+  if (!projectId) throw new Error("projectId is required");
+
+  const project = await db.aIProject.findUnique({
     where: { id: projectId },
     include: {
       files: {
@@ -45,14 +64,20 @@ export const getAIProjectById = async (projectId: string) => {
       },
     },
   });
+
+  if (!project) return null;
+
+  return project;
 };
 
 // ── UPDATE PROJECT ────────────────────────────────────────────────────────────
 
 export const updateAIProject = async (
   projectId: string,
-  data: { name?: string; description?: string }
+  data: ProjectUpdateInput
 ) => {
+  if (!projectId) throw new Error("projectId is required");
+
   return db.aIProject.update({
     where: { id: projectId },
     data,
@@ -63,14 +88,28 @@ export const updateAIProject = async (
 
 export const upsertAIProjectFiles = async (
   projectId: string,
-  files: { path: string; content: string }[]
+  files: ProjectFileInput[]
 ) => {
+  if (!projectId) throw new Error("projectId is required");
+  if (!files || files.length === 0) return;
+
   await db.$transaction(
     files.map((file) =>
       db.aIProjectFile.upsert({
-        where: { projectId_path: { projectId, path: file.path } },
-        update: { content: file.content },
-        create: { projectId, path: file.path, content: file.content },
+        where: {
+          projectId_path: {
+            projectId,
+            path: file.path,
+          },
+        },
+        update: {
+          content: file.content,
+        },
+        create: {
+          projectId,
+          path: file.path,
+          content: file.content,
+        },
       })
     )
   );
@@ -86,7 +125,11 @@ export const upsertAIProjectFiles = async (
 export const deleteAIProject = async (
   subaccountId: string,
   projectId: string
-) => {
+): Promise<DeleteResult> => {
+  if (!subaccountId || !projectId) {
+    return { error: "Invalid request" };
+  }
+
   const project = await db.aIProject.findUnique({
     where: { id: projectId },
     select: { id: true, subAccountId: true },
@@ -96,6 +139,9 @@ export const deleteAIProject = async (
     return { error: "Project not found or access denied" };
   }
 
-  await db.aIProject.delete({ where: { id: projectId } });
+  await db.aIProject.delete({
+    where: { id: projectId },
+  });
+
   return { success: true };
 };

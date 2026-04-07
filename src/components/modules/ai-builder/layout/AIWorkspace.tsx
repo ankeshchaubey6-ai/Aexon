@@ -299,20 +299,17 @@ const AIWorkspace = () => {
   const [showDeployDrawer, setShowDeployDrawer] = useState(false);
   const [exportMenuOpen, setExportMenuOpen]     = useState(false);
 
-  // ── Reset store + WebContainer whenever the URL projectId changes ────────────
-  // This is the fix for Bug 2: stale preview from previous project.
-  // resetContainer() kills the dev server and clears _globalUrl immediately,
-  // so LivePreview stops rendering the old iframe before new files load.
+  // ── Reset + load effect (FIXED for StrictMode) ───────────────────────────────
   useEffect(() => {
     if (!projectId || projectId === "new") return;
     if (loadedForProjectRef.current === projectId) return;
 
-    // 1. Wipe the old project's WebContainer state (kills dev server, clears URL)
-    resetContainer();
+    // ✅ FIX: set the ref BEFORE reset() so StrictMode's second invoke
+    // hits the guard above and exits — no double-wipe mid-load.
+    loadedForProjectRef.current = projectId;
 
-    // 2. Wipe the Zustand store so ChatPanel's isEditMode resets correctly
+    resetContainer();
     reset();
-    loadedForProjectRef.current = null;
 
     const load = async () => {
       try {
@@ -320,14 +317,12 @@ const AIWorkspace = () => {
         if (!res.ok) {
           console.warn(`[AIWorkspace] Project ${projectId} not found — new project`);
           setProject(projectId);
-          loadedForProjectRef.current = projectId;
           return;
         }
 
         const data = await res.json();
         const loadedFiles = data?.project?.files ?? [];
 
-        loadedForProjectRef.current = projectId;
         setProject(projectId);
 
         if (loadedFiles.length > 0) {
@@ -339,8 +334,16 @@ const AIWorkspace = () => {
     };
 
     load();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  // ── Auto‑switch sidebar to Files tab when files arrive ───────────────────────
+  useEffect(() => {
+    if (files.length > 0) {
+      setSidebarTab("files");
+      if (!sidebarOpen) setSidebarOpen(true);
+    }
+  }, [files.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!exportMenuOpen) return;
@@ -465,7 +468,6 @@ const AIWorkspace = () => {
               <div
                 className="h-full transition-all duration-300 overflow-hidden"
                 style={{ width: DEVICE_WIDTHS[device] }}>
-                {/* Pass storeProjectId so LivePreview can detect project switches */}
                 <LivePreview projectId={storeProjectId} />
               </div>
             ) : (

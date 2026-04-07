@@ -82,7 +82,7 @@ function CreateProjectModal({
     if (!trimmed) { setError("Project name is required."); return; }
     startTransition(async () => {
       const result = await createAIProject(subaccountId, trimmed);
-      if ("error" in result) { setError(result.error); return; }
+      if ("error" in result) { setError(result.error ?? "Something went wrong"); return; }
       onCreated(result.project);
       router.push(`/subaccount/${subaccountId}/ai-builder/${result.project.id}`);
     });

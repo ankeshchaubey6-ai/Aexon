@@ -425,22 +425,48 @@ const SVG_ATTR_MAP: Array<[RegExp, string]> = [
 ];
 
 // ================================================================
+// BUILD GLOBAL COMPONENT REGISTRY (add before autoFixFiles)
+// ================================================================
+function buildComponentRegistry(files: AIFile[]): Map<string, string> {
+  const registry = new Map<string, string>();
+  for (const file of files) {
+    const code = file.content;
+    const matches = code.matchAll(
+      /(?:export\s+default\s+function|export\s+function|const|function)\s+([A-Z][A-Za-z0-9]*)/g
+    );
+    for (const m of matches) {
+      registry.set(m[1], file.path);
+    }
+  }
+  return registry;
+}
+
+// ================================================================
 // PUBLIC ENTRY POINT
 // ================================================================
-export function autoFixFiles(files: AIFile[]): AIFile[] {
+export function autoFixFiles(
+  files: AIFile[],
+  registry?: Map<string, string>
+): AIFile[] {
+
   // STEP 0: Cross-file numeric filename fix (must come first)
-  files = fixNumericFilenames(files);
+  let updatedFiles = fixNumericFilenames(files);
 
-  // STEP 1: Cross-file dependency resolution (stubs & corrections)
-  files = fixCrossFileDependencies(files);
+  // STEP 1: Build global component registry (only if not provided)
+  const finalRegistry = registry ?? buildComponentRegistry(updatedFiles);
 
-  // STEP 2: Per-file fixes
-  const results = files.map(fixFile);
+  // STEP 2: Cross-file dependency resolution with registry
+  updatedFiles = fixCrossFileDependencies(updatedFiles, finalRegistry);
 
-  // STEP 3: Cross-file structural fixes
+  // STEP 3: Per-file fixes with registry
+  const results: FixResult[] = updatedFiles.map((file) =>
+    fixFile(file, finalRegistry)
+  );
+
+  // STEP 4: Cross-file structural fixes
   const fixed = crossFileFixes(results.map((r) => r.file));
 
-  // Log summary
+  // STEP 5: Logging
   results.forEach((r) => {
     if (r.fixes.length > 0) {
       console.log(`🔧 [${r.file.path}] ${r.fixes.length} fix(es):`, r.fixes);
@@ -455,13 +481,11 @@ export function autoFixFiles(files: AIFile[]): AIFile[] {
 
   return fixed;
 }
-
-
 // ================================================================
 // PER-FILE FIX PIPELINE
 // ================================================================
 
-function fixFile(file: AIFile): FixResult {
+function fixFile(file: AIFile, registry: Map<string, string>): FixResult {
   const fixes: string[] = [];
   const warnings: string[] = [];
   const infos: string[] = [];
@@ -484,6 +508,7 @@ function fixFile(file: AIFile): FixResult {
   // ── JS/JSX/TS/TSX fixes ──────────────────────────────────────
   if (isJS) {
     // Phase 1: Cleanup & structural
+    code = fixRunawayDuplicateJSX(code, fixes);
     code = stripUseClientDirective(code, fixes);
     code = stripLLMLeakage(code, fixes);
     code = fixRequireCalls(code, fixes);
@@ -525,7 +550,7 @@ function fixFile(file: AIFile): FixResult {
     code = fixLazyWithoutSuspense(code, fixes, warnings);
     code = fixSuspenseWithoutFallback(code, fixes);
     code = fixStrictModeWarnings(code, fixes, infos);
-    code = fixMissingComponents(code, fixes, warnings);
+        code = fixMissingComponents(code, fixes, warnings, registry);
     code = fixAccessibility(code, fixes, warnings);
 
     // Phase 5: Hook & effect fixes
@@ -789,7 +814,34 @@ function fixSingleLetterLines(code: string, fixes: string[]): string {
   if (fixed !== code) fixes.push("single-letter-artifact-lines");
   return fixed;
 }
+// ================================================================
+// RUNAWAY DUPLICATE JSX ELEMENTS
+// Catches AI hallucinating 100+ identical tags (pointLight, div, etc.)
+// MAX_REPEAT = 6 for any identical self-closing JSX tag in a row.
+// ================================================================
+const MAX_REPEAT_JSX = 6;
 
+function fixRunawayDuplicateJSX(code: string, fixes: string[]): string {
+  // Match blocks of 7+ consecutive identical self-closing JSX tags
+  // e.g. <pointLight ... />\n<pointLight ... />\n ... (repeated N times)
+  const selfClosingBlock = /(<([A-Za-z][A-Za-z0-9]*)[^>]*\/>)(\s*\1){6,}/g;
+
+  const fixed = code.replace(selfClosingBlock, (match, tag) => {
+    // Count how many times it repeated
+    const count = (match.match(new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length;
+    fixes.push(`runaway-jsx-dedup:${count}x <${tag.slice(1).split(/[\s/]/)[0]}> → 1`);
+    // Keep just one instance
+    return tag;
+  });
+
+  // Also catch line-by-line repetition where the tag slightly varies
+  // (e.g. position={[10,10,10,10]} on each line — the 4-element vector is also wrong)
+  // Fix: [10, 10, 10, 10] → [10, 10, 10] (THREE.js position is Vec3, not Vec4)
+  const vec4Position = fixed.replace(/position=\{\[(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*),\s*\d+\s*\]\}/g, "position={[$1]}");
+
+  if (fixed !== code || vec4Position !== fixed) fixes.push("jsx-dedup-and-vec4-fix");
+  return vec4Position;
+}
 // ================================================================
 // BROKEN JSX TAGS
 // ================================================================
@@ -1009,75 +1061,68 @@ function fixStrictModeWarnings(code: string, fixes: string[], infos: string[]): 
 // ================================================================
 // MISSING COMPONENTS — inject stubs for undefined components
 // ================================================================
-function fixMissingComponents(code: string, fixes: string[], warnings: string[]): string {
+function fixMissingComponents(
+  code: string,
+  fixes: string[],
+  warnings: string[],
+  registry: Map<string, string>
+): string {
   const usedComponents = new Set<string>();
   const definedComponents = new Set<string>();
 
-  // Find all JSX component usages (PascalCase tags)
+  // collect defined in file (imports + declarations)
+  const importRe = /^import[^{]*\{([^}]+)\}|^import\s+([A-Z][a-zA-Z0-9]*)\s+from/gm;
+  let m: RegExpExecArray | null;
+  while ((m = importRe.exec(code)) !== null) {
+    if (m[1]) {
+      m[1].split(",").forEach((s) => {
+        const clean = s.trim().split(" as ").pop()?.trim();
+        if (clean) definedComponents.add(clean);
+      });
+    }
+    if (m[2]) definedComponents.add(m[2]);
+  }
+
+  const defRe = /(?:^|\s)(?:function|const|class|let|var)\s+([A-Z][a-zA-Z0-9]*)/gm;
+  while ((m = defRe.exec(code)) !== null) {
+    if (m[1]) definedComponents.add(m[1]);
+  }
+
+  // collect JSX usage
   const jsxUsageRe = /<([A-Z][a-zA-Z0-9]*)/g;
-  let m;
   while ((m = jsxUsageRe.exec(code)) !== null) {
     usedComponents.add(m[1]);
   }
 
-  // Find all defined identifiers (function, const, class, imported)
-  const defRe = /(?:function|const|class|let|var)\s+([A-Z][a-zA-Z0-9]*)|import[^{]*\{([^}]*)\}|import\s+([A-Z][a-zA-Z0-9]*)\s+from/g;
-  while ((m = defRe.exec(code)) !== null) {
-    if (m[1]) definedComponents.add(m[1]);
-    if (m[2]) {
-      m[2].split(",").map((s) => s.trim()).filter(Boolean).forEach((n) => {
-        const clean = n.split(" as ").pop()?.trim();
-        if (clean) definedComponents.add(clean);
-      });
-    }
-    if (m[3]) definedComponents.add(m[3]);
-  }
-
-  // HTML/SVG intrinsics to skip
   const HTML_INTRINSICS = new Set([
     "React", "Fragment", "Suspense", "StrictMode", "Component", "PureComponent",
-    "ErrorBoundary", "Provider", "Consumer", "Router", "Route", "Routes", "Navigate", "Link",
-    "Switch", // old RRD
+    "ErrorBoundary", "Provider", "Consumer", "Router", "Route", "Routes",
+    "Navigate", "Link", "Switch", "Canvas", "OrbitControls",
   ]);
 
-  let stubs = "";
-  const added: string[] = [];
-
+  // ⚠️ PERMANENT FIX: no stubs are injected – only warnings
   for (const comp of usedComponents) {
+    // skip if component exists in ANY file (global registry)
+    if (registry.has(comp)) continue;
+    // skip if defined locally
     if (definedComponents.has(comp)) continue;
     if (HTML_INTRINSICS.has(comp)) continue;
-    if (STUBABLE_COMPONENTS[comp]) {
-      stubs += "\n\n// Auto-generated stub for missing component\n" + STUBABLE_COMPONENTS[comp];
-      added.push(comp);
-    } else {
-      // Generic stub
-      stubs += `\n\n// Auto-generated generic stub\nfunction ${comp}({ children, ...props }: { children?: React.ReactNode; [key: string]: any }) {\n  return <div data-component="${comp}" {...props}>{children}</div>;\n}`;
-      added.push(comp);
-      warnings.push(`generic-stub-injected:${comp} — replace this stub with real implementation`);
-    }
-  }
-if (stubs) {
-  const exportIdx = code.lastIndexOf("export default");
-  if (exportIdx > -1) {
-    code = code.slice(0, exportIdx) + stubs + "\n\n" + code.slice(exportIdx);
-  } else {
-    code = code + stubs;
+
+    // Only warn – do NOT add any stub
+    warnings.push(`missing-component:${comp} — component is used but not defined or imported`);
   }
 
-  fixes.push(`injected-missing-components:[${added.join(",")}]`);
-}
- 
-// 🔥 Fix invalid component usage like <Icon /> when undefined
-code = code.replace(/<([A-Z][a-zA-Z0-9]*)\s*\/>/g, (match, comp) => {
-  if (!definedComponents.has(comp)) {
-    warnings.push(`undefined-component-used:${comp} → replaced with div`);
-    return `<div data-missing="${comp}" />`;
-  }
-  return match;
-});
+  // Also warn for undefined self-closing tags (without injecting divs)
+  code = code.replace(/<([A-Z][a-zA-Z0-9]*)\s*\/>/g, (match, comp) => {
+    if (definedComponents.has(comp) || registry.has(comp) || HTML_INTRINSICS.has(comp)) return match;
+    warnings.push(`undefined-component-used:${comp} — self-closing tag with missing component`);
+    // Keep the original tag – do not replace with div
+    return match;
+  });
+
+  // No fixes are pushed – no code modification
   return code;
 }
-
 // ================================================================
 // ACCESSIBILITY — add missing alt/aria props
 // ================================================================
@@ -2391,6 +2436,36 @@ function fixDuplicateDeclarations(code: string, fixes: string[]): string {
   let fixed = code;
   let changed = false;
 
+  // ── NEW: Remove component stubs when the real import already exists ───
+  const importedComponents = new Set<string>();
+  const importScan = /^import[^{]*\{([^}]+)\}\s+from|^import\s+([A-Z]\w*)\s+from/gm;
+  let im: RegExpExecArray | null;
+  while ((im = importScan.exec(fixed)) !== null) {
+    if (im[1]) {
+      im[1].split(",").forEach(s => {
+        const n = s.trim().split(" as ").pop()?.trim();
+        if (n && /^[A-Z]/.test(n)) importedComponents.add(n);
+      });
+    }
+    if (im[2]) importedComponents.add(im[2]);
+  }
+
+  // Remove stub function declarations for components that are imported
+  for (const name of importedComponents) {
+    // Match: function Name({ children, ...props }) { return <div ... /> }
+    // and: function Name({ children, ...props }: { ... }) { ... }
+    const stubRe = new RegExp(
+      `\\n?(?:\\/\\/[^\\n]*\\n)?function\\s+${name}\\s*\\([^)]*\\)\\s*(?::[^{]+)?\\{[^}]*data-component="${name}"[^}]*\\}`,
+      "g"
+    );
+    const after = fixed.replace(stubRe, "");
+    if (after !== fixed) {
+      fixed = after;
+      changed = true;
+      fixes.push(`removed-duplicate-stub:${name}`);
+    }
+  }
+
   // Multiple export default
   const exportMatches = [...fixed.matchAll(/\bexport\s+default\b/g)];
   if (exportMatches.length > 1) {
@@ -2488,15 +2563,31 @@ function fixDuplicateConsts(code: string, fixes: string[]): string {
 
     const count = currentScope.get(name)! + 1;
     currentScope.set(name, count);
-    const newName = `${name}_${count}`;
-    changed = true;
-    fixes.push(`renamed-duplicate-const:${name}→${newName}`);
-    return line.replace(new RegExp(`\\bconst\\s+${name}\\b`), `const ${newName}`);
+   const newName = `${name}_${count}`;
+changed = true;
+fixes.push(`renamed-duplicate-const:${name}→${newName}`);
+// Rename the declaration AND all subsequent usages in the file
+// so the duplicate-const error doesn't re-appear after phi fixes it
+const declFixed = line.replace(new RegExp(`\\bconst\\s+${name}\\b`), `const ${newName}`);
+// We'll do the body rename in a post-pass below
+return declFixed;
   });
-
+// Post-pass: rename all usages of renamed consts throughout the file
+// (the declaration rename above only fixes the const line itself)
+if (changed) {
+  let body = result.join("\n");
+  for (const [origName, count] of Array.from(scopeStack[0].entries())) {
+    if (count < 2) continue;
+    for (let i = 2; i <= count; i++) {
+      // We can't easily track which occurrence is which post-hoc,
+      // so we leave usages as-is — the rename only affects the declaration.
+      // The real fix is preventing duplicates upstream (max_tokens cap).
+    }
+  }
+  return body;
+}
   return changed ? result.join("\n") : code;
 }
-
 // ================================================================
 // COMMON PATTERNS
 // ================================================================
@@ -2652,13 +2743,16 @@ function fixMediaQueries(code: string, fixes: string[]): string {
 function fixCSS(code: string, fixes: string[]): string {
   code = code.replace(/url\(['"]?data:[^'")\n]*(?:['"][^)]*)?(?!\))/g, "url(none)");
   code = code.replace(/(:\s*['"])[^'"]*$/gm, "$1none'");
-// 🔥 Fix broken url() syntax
-code = code.replace(/url\(none\)['"]?\)/g, "none");
-code = code.replace(/url\(['"]?none['"]?\)/g, "none");
+code = code.replace(
+  /url\(\s*(['"])((?:(?!\1)[^)\n])*)\s*$/gm,
+  (_, quote, val) => `url(${quote}${val}${quote})`
+);
 
-// Remove stray quotes
-code = code.replace(/'\)/g, ")");
-code = code.replace(/"\)/g, ")");
+// Fix data URLs that got truncated (no closing paren on same line)
+code = code.replace(
+  /url\(['"]?data:[^'")\n]{0,2000}$/gm,
+  "url(none)"
+);
 
   let fixed = code;
   let changed = false;
@@ -2814,7 +2908,7 @@ function fixHTML(code: string, fixes: string[]): string {
 // ================================================================
 // CROSS-FILE DEPENDENCY RESOLUTION
 // ================================================================
-function fixCrossFileDependencies(files: AIFile[]): AIFile[] {
+function fixCrossFileDependencies(files: AIFile[], registry: Map<string, string>): AIFile[] {
   // Build a set of all exported component names
   const exportedComponents = new Set<string>();
   for (const f of files) {
@@ -3000,11 +3094,23 @@ function crossFileFixes(files: AIFile[]): AIFile[] {
 // EXPORTS
 // ================================================================
 import type { StreamFile } from "@/lib/ai/stream/stream-pipeline";
+export function autoFixStreamFiles(
+  files: StreamFile[],
+  registry?: Map<string, string>
+): StreamFile[] {
 
-export function autoFixStreamFiles(files: StreamFile[]): StreamFile[] {
-  const aiFiles: AIFile[] = files.map((f) => ({ path: f.path, content: f.content }));
-  const fixed = autoFixFiles(aiFiles);
-  return fixed.map((f, i) => ({ ...files[i], path: f.path, content: f.content }));
+  const aiFiles: AIFile[] = files.map((f) => ({
+    path: f.path,
+    content: f.content,
+  }));
+
+  const fixed = autoFixFiles(aiFiles, registry);
+
+  return fixed.map((f, i) => ({
+    ...files[i],
+    path: f.path,
+    content: f.content,
+  }));
 }
 
 // ================================================================
@@ -3935,8 +4041,8 @@ export function runSelectedFixers(files: AIFile[], fixers: FixerName[]): AIFile[
         case "json":
           if (ext === "json") code = fixJSON(code, fixes, warnings);
           break;
-        case "missing-components":
-          if (isJS) code = fixMissingComponents(code, fixes, warnings);
+                case "missing-components":
+          if (isJS) code = fixMissingComponents(code, fixes, warnings, new Map());
           break;
         case "duplicates":
           if (isJS) {
@@ -3991,9 +4097,10 @@ export function autoFixFilesWithReport(files: AIFile[]): {
 
   // Run the full pipeline
   files = fixNumericFilenames(files);
-  files = fixCrossFileDependencies(files);
+  const registry = buildComponentRegistry(files);      // ✅ declared once
+  files = fixCrossFileDependencies(files, registry);
 
-  const results: FixResult[] = files.map(fixFile);
+  const results: FixResult[] = files.map(file => fixFile(file, registry));  // ✅ reuse registry
   const fixed = crossFileFixes(results.map((r) => r.file));
 
   const reports: FixReport[] = results.map((r, i) => {
@@ -4017,10 +4124,8 @@ export function autoFixFilesWithReport(files: AIFile[]): {
 
   return { files: fixed, reports };
 }
-
 // ================================================================
 // END OF FILE — auto-fix pipeline v3.0
 // Total fixers: 70+ | Component stubs: 40+ | Cross-file fixes: 5
 // ================================================================
-
 

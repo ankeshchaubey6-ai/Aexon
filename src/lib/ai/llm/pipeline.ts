@@ -442,8 +442,11 @@ function fixEscapeArtifacts(code: string, fixes: string[]): string {
   //   = />     (space-slash-gt — most common)
   //   =/ >     (slash before space)
   //   =/\>     (escaped gt)
-  fixed = fixed.replace(/(\))\s*=\s*\/\s*>/g, "$1 =>");
-  fixed = fixed.replace(/(\))\s*=\/\s*>/g, "$1 =>");
+  // Pass A: closing paren/bracket before mangled arrow (event handlers)
+fixed = fixed.replace(/(\)|\])\s*=\s*\/\s*>/g, "$1 =>");
+fixed = fixed.replace(/(\)|\])\s*=\/\s*>/g, "$1 =>");
+// Pass B: any remaining = /> not already part of => (catches onChange={val = /> setVal})
+fixed = fixed.replace(/(?<!=)=\s*\/\s*>/g, "=>");
 
   // Broken ternary: "? /" → "? " (proxy treating ? as email boundary)
   // Only fix inside JSX attribute context to avoid breaking regex literals

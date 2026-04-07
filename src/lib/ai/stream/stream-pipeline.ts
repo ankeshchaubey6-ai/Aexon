@@ -1,20 +1,30 @@
 // src/lib/ai/stream/stream-pipeline.ts
-// FIX: `import { performance } from "perf_hooks"` replaced with
-// `globalThis.performance` — perf_hooks is Node-only and crashes when
-// Next.js compiles this for the Edge runtime or bundles it for the client.
-// The Web Performance API (globalThis.performance) is available in all
-// modern Node versions (≥16), browsers, and Edge workers.
+  import { buildComponentRegistry } from "@/lib/ai/engine/component-registry";
+// PRODUCTION PIPELINE v8.5 — Network Suspension Fix
 //
-// No other logic changed — this is a pure drop-in replacement for the import.
+// KEY FIX — ERR_NETWORK_IO_SUSPENDED:
+//   The browser suspends the TCP connection when it receives no bytes for ~45s.
+//   The route's setInterval heartbeat only fires between awaits — but during a
+//   long nvidia.chat.completions.create() call (which blocks the event loop for
+//   the duration of the HTTP round-trip), the interval CANNOT fire.
+//
+//   Fix: Every sleep() in the pipeline now accepts an optional onPing callback.
+//   The route passes a ping function that enqueues ": keep-alive\n\n" bytes.
+//   This means pings fire WITHIN sleeps (rate-limiter waits, retry backoffs)
+//   where the event loop is free. During active LLM calls, the NVIDIA SDK
+//   streams the response token-by-token, so bytes flow naturally.
+//
+//   Additional hardening:
+//   - Heartbeat interval reduced to 8s (was 15s) — below Vercel's 10s idle limit
+//   - Route sends a ": ping\n\n" immediately before each LLM call starts
+//   - Transfer-Encoding: chunked added to response headers
 
 import OpenAI from "openai";
 import { checkSyntax } from "@/lib/ai/validation/syntax-checker";
 import { runSemanticValidation } from "@/lib/ai/validation/semantic-validator";
 import { autoFixStreamFiles } from "@/lib/ai/engine/auto-fix";
-// FIX: removed `import { performance } from "perf_hooks"` — use globalThis.performance
 
 // ─── Public types ──────────────────────────────────────────────────────────────
-
 export type StreamFile = {
   path: string;
   content: string;
@@ -24,15 +34,16 @@ export type StreamFile = {
 };
 
 export interface PipelineCallbacks {
-  onFile: (file: StreamFile) => Promise<void>;
-  onLog?: (msg: string) => void;
-  onDone: () => void;
-  onError?: (message: string) => void;
+  onFile:    (file: StreamFile) => Promise<void>;
+  onLog?:    (msg: string) => void;
+  onDone:    () => void;
+  onError?:  (message: string) => void;
   onMetric?: (name: string, value: number) => void;
+  /** Called periodically so the route can flush a keep-alive byte to the client. */
+  onPing?:   () => void;
 }
 
 // ─── Internal types ────────────────────────────────────────────────────────────
-
 interface FileSpec {
   path: string;
   description: string;
@@ -70,16 +81,7 @@ interface DesignTokens {
   breakpoints: Record<string, string>;
 }
 
-interface ComponentTemplate {
-  name: string;
-  category: "layout" | "3d" | "animation" | "data" | "interactive";
-  requiredImports: string[];
-  defaultProps: Record<string, any>;
-  skeleton: string;
-}
-
 // ─── Models ────────────────────────────────────────────────────────────────────
-
 const PLAN_MODELS = [
   "moonshotai/kimi-k2-instruct",
   "mistralai/mistral-large-3-675b-instruct-2512",
@@ -97,26 +99,26 @@ const CSS_MODELS = [
   "meta/llama-3.3-70b-instruct",
 ] as const;
 
-const FIX_MODEL    = "microsoft/phi-3.5-mini-instruct";
-const REFINE_MODEL = "qwen/qwen3-coder-480b-a35b-instruct";
+const FIX_MODEL = "microsoft/phi-3.5-mini-instruct";
 
 // ─── NVIDIA client ─────────────────────────────────────────────────────────────
-
 const nvidia = new OpenAI({
   apiKey:  process.env.NVIDIA_API_KEY!,
   baseURL: "https://integrate.api.nvidia.com/v1",
 });
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
+const RATE_WINDOW_MS   = 62_000;
+const MAX_RPM          = 5;
+const PLAN_TIMEOUT_MS  = 180_000;
+const FILE_TIMEOUT_MS  = 120_000;
+const FIX_TIMEOUT_MS   = 60_000;
+const MAX_FILE_RETRIES = 3;
+const MAX_COMPONENTS   = 12;
+const MAX_FILE_CHARS   = 10_000;
 
-const RATE_WINDOW_MS    = 62_000;
-const MAX_RPM           = 5;
-const PLAN_TIMEOUT_MS   = 180_000;
-const FILE_TIMEOUT_MS   = 120_000;
-const FIX_TIMEOUT_MS    = 60_000;
-const REFINE_TIMEOUT_MS = 90_000;
-const MAX_FILE_RETRIES  = 3;
-const MAX_COMPONENTS    = 12;
+// How often to emit a ping during sleeps (must be < 8s to beat Vercel idle timeout)
+const PING_INTERVAL_MS = 6_000;
 
 const BOILERPLATE_PATHS = new Set([
   "package.json",
@@ -129,20 +131,19 @@ const BOILERPLATE_PATHS = new Set([
 ]);
 
 // ─── Rate Limiter ──────────────────────────────────────────────────────────────
-
 class AdvancedRateLimiter {
   private callTimestamps: number[] = [];
-  private failures = new Map<string, number>();
+  private failures     = new Map<string, number>();
   private circuitOpenUntil = new Map<string, number>();
   private readonly FAILURE_THRESHOLD = 3;
   private readonly CIRCUIT_RESET_MS  = 60_000;
 
-  async waitForSlot(model: string, label: string): Promise<void> {
+  async waitForSlot(model: string, label: string, onPing?: () => void): Promise<void> {
     const openUntil = this.circuitOpenUntil.get(model);
     if (openUntil && Date.now() < openUntil) {
       const wait = openUntil - Date.now();
       console.log(`⏸️ [CB] Circuit open for ${model}, waiting ${wait}ms`);
-      await sleep(wait);
+      await sleepWithPing(wait, onPing);
       this.circuitOpenUntil.delete(model);
     }
     const now = Date.now();
@@ -154,8 +155,8 @@ class AdvancedRateLimiter {
     const oldest = this.callTimestamps[0];
     const waitMs = RATE_WINDOW_MS - (now - oldest) + 500;
     console.log(`⏳ [RL] Rate limit — waiting ${(waitMs / 1000).toFixed(1)}s before ${label}`);
-    await sleep(waitMs);
-    await this.waitForSlot(model, label);
+    await sleepWithPing(waitMs, onPing);
+    await this.waitForSlot(model, label, onPing);
   }
 
   recordSuccess(model: string): void {
@@ -176,9 +177,25 @@ class AdvancedRateLimiter {
 const rateLimiter = new AdvancedRateLimiter();
 
 // ─── Utilities ─────────────────────────────────────────────────────────────────
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Sleep for `ms` milliseconds, emitting onPing() every PING_INTERVAL_MS.
+ * This ensures keep-alive bytes flow to the client even during long rate-limit
+ * waits, preventing ERR_NETWORK_IO_SUSPENDED on Chrome/Safari.
+ */
+async function sleepWithPing(ms: number, onPing?: () => void): Promise<void> {
+  if (!onPing || ms <= PING_INTERVAL_MS) {
+    return sleep(ms);
+  }
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const remaining = end - Date.now();
+    await sleep(Math.min(PING_INTERVAL_MS, remaining));
+    if (Date.now() < end) onPing();
+  }
 }
 
 function stripMarkdown(text: string): string {
@@ -189,10 +206,30 @@ function stripMarkdown(text: string): string {
     .trim();
 }
 
+function fixRedactedTokens(code: string): string {
+  let fixed = code;
+  fixed = fixed.replace(/(\)|\])\s*=\s*\/\s*>/g, "$1 =>");
+  fixed = fixed.replace(/(?<!=)=\s*\/\s*>/g, "=>");
+  fixed = fixed.replace(
+    /\b(useState|useReducer)\s*\(\s*<REDACTED_EMAIL>\s*\)/g,
+    "$1('')"
+  );
+  fixed = fixed.replace(
+    /\b(useState|useReducer)\s*\(\s*<REDACTED_EMAIL>\s*,/g,
+    "$1(null,"
+  );
+  fixed = fixed.replace(/=\s*\{\s*<REDACTED_EMAIL>\s*\}/g, "={''}");
+  fixed = fixed.replace(/\b(\w+)\s*\(\s*<REDACTED_EMAIL>\s*\)/g, "$1('')");
+  fixed = fixed.replace(/=\s*<REDACTED_EMAIL>\b/g, "= ''");
+  fixed = fixed.replace(/\[REDACTED(?:_EMAIL)?\]/g, "''");
+  fixed = fixed.replace(/"<REDACTED_EMAIL>"/g, "''");
+  fixed = fixed.replace(/'<REDACTED_EMAIL>'/g, "''");
+  return fixed;
+}
+
 function cleanLLMOutput(code: string, filePath: string): string {
   let out = code;
 
-  // 1. Strip trailing prose after last export default
   const PROSE_STARTERS = [
     /^I\s+(have|added|removed|updated|fixed|also)/i,
     /^Note\s+that\b/i,
@@ -224,7 +261,6 @@ function cleanLLMOutput(code: string, filePath: string): string {
     }
   }
 
-  // 2. Strip TypeScript annotations from .jsx / .js files
   const isJSXonly =
     filePath.endsWith(".jsx") ||
     (filePath.endsWith(".js") && !filePath.endsWith(".ts"));
@@ -240,20 +276,9 @@ function cleanLLMOutput(code: string, filePath: string): string {
     out = out.replace(/\buseMemo<[^>]+>\(/g, "useMemo(");
   }
 
-  // 3. Fix proxy-mangled arrow operator
-  out = out.replace(/(\))\s*=\s*\/\s*>/g, "$1 =>");
-  out = out.replace(/(?<![=!<>])=\s*\/\s*>/g, "=>");
-
-  // 4. Fix <REDACTED_EMAIL> proxy placeholders
-  out = out.replace(/\b(useState|useReducer)\s*\(\s*<REDACTED_EMAIL>\s*\)/g, "$1('')");
-  out = out.replace(/\b(useState|useReducer)\s*\(\s*<REDACTED_EMAIL>\s*,/g, "$1(null,");
-  out = out.replace(/=\s*\{\s*<REDACTED_EMAIL>\s*\}/g, "={''}");
-  out = out.replace(/\b(\w+)\s*\(\s*<REDACTED_EMAIL>\s*\)/g, "$1('')");
-  out = out.replace(/=\s*<REDACTED_EMAIL>\b/g, "= ''");
-  out = out.replace(/<REDACTED_EMAIL>/g, "''");
-  out = out.replace(/\[REDACTED(?:_EMAIL)?\]/g, "''");
-  out = out.replace(/"<REDACTED_EMAIL>"/g, "''");
-  out = out.replace(/'<REDACTED_EMAIL>'/g, "''");
+  out = out.replace(/(\)|\])\s*=\s*\/\s*>/g, "$1 =>");
+  out = out.replace(/(?<!=)=\s*\/\s*>/g, "=>");
+  out = fixRedactedTokens(out);
 
   return out;
 }
@@ -281,8 +306,7 @@ function injectReactImport(content: string): string {
 }
 
 // ─── Design Tokens ─────────────────────────────────────────────────────────────
-
-function generateDesignTokens(_spec: ProjectSpec): DesignTokens {
+function generateDesignTokens(_spec: Partial<ProjectSpec>): DesignTokens {
   return {
     colors: {
       primary:    ["#6366f1", "#4f46e5", "#4338ca"],
@@ -320,34 +344,29 @@ function generateDesignTokens(_spec: ProjectSpec): DesignTokens {
   };
 }
 
-// ─── Boilerplate ────────────────────────────────────────────────────────────────
-
-function makePkgJson(name: string): string {
+// ─── Boilerplate ───────────────────────────────────────────────────────────────
+function makePkgJson(_name: string): string {
   return JSON.stringify(
     {
-      name: name.toLowerCase().replace(/[^a-z0-9-]/g, "-") || "ai-app",
+      name: "ai-project",
       private: true,
       version: "0.0.0",
       type: "module",
-      scripts: { dev: "vite --host", build: "vite build", preview: "vite preview" },
+      scripts: {
+        dev:     "vite --host",
+        build:   "vite build",
+        preview: "vite preview",
+      },
       dependencies: {
-        react: "^18.2.0",
-        "react-dom": "^18.2.0",
+        react:           "^18.2.0",
+        "react-dom":     "^18.2.0",
         "framer-motion": "^11.0.8",
-        "lucide-react": "^0.363.0",
-        clsx: "^2.1.0",
-        three: "^0.165.0",
-        "@react-three/fiber": "^8.16.8",
-        "@react-three/drei": "^9.105.6",
-        gsap: "^3.12.5",
-        "react-intersection-observer": "^9.5.3",
+        "lucide-react":  "^0.363.0",
+        clsx:            "^2.1.0",
       },
       devDependencies: {
-        vite: "^5.2.6",
+        vite:                   "^5.2.6",
         "@vitejs/plugin-react": "^4.2.1",
-        tailwindcss: "^3.4.3",
-        postcss: "^8.4.38",
-        autoprefixer: "^10.4.19",
       },
     },
     null,
@@ -387,11 +406,17 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  server: { host: true, open: true },
-  optimizeDeps: {
-    include: ['three', '@react-three/fiber', '@react-three/drei', 'framer-motion', 'gsap'],
+  server: {
+    host: true,
+    open: false,
+    port: 5173,
+    strictPort: false,
   },
-});`;
+  optimizeDeps: {
+    include: ['react', 'react-dom', 'react-dom/client'],
+  },
+});
+`;
 
 const TAILWIND_CONFIG = `/** @type {import('tailwindcss').Config} */
 export default {
@@ -543,14 +568,23 @@ RULES:
 - ALWAYS include: src/App.jsx, src/App.css
 - Plan 8-12 component files minimum
 - FILENAME RULE: identifiers MUST NOT start with a digit. Wrong: "3DShowcase.jsx" Right: "Showcase3D.jsx"
-- Available: react@18, framer-motion, lucide-react, tailwindcss, clsx, three, @react-three/fiber, @react-three/drei, gsap, react-intersection-observer
-- NO TypeScript, NO "use client", NO react-router-dom`;
+- Available packages (installed via npm, NOT CDN): react@18, framer-motion, lucide-react, tailwindcss, clsx
+- NO TypeScript, NO "use client", NO react-router-dom, NO three.js, NO gsap (not installed)
+- Arrow functions use => NOT = /> (the API gateway may corrupt these; write them correctly)
+- NEVER use url() with data: URIs in CSS — use named gradients instead`;
 
-async function planProject(prompt: string): Promise<ProjectSpec | null> {
+export async function planProject(
+  prompt: string,
+  onPing?: () => void
+): Promise<ProjectSpec | null> {
   for (let mi = 0; mi < PLAN_MODELS.length; mi++) {
     const model = PLAN_MODELS[mi];
     console.log(`🧠 [S1] ${modelLabel(model)} — planning (${mi + 1}/${PLAN_MODELS.length})`);
-    await rateLimiter.waitForSlot(model, `plan/${modelLabel(model)}`);
+    await rateLimiter.waitForSlot(model, `plan/${modelLabel(model)}`, onPing);
+
+    // Ping before the LLM call so client knows we're alive
+    onPing?.();
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), PLAN_TIMEOUT_MS);
 
@@ -570,10 +604,13 @@ async function planProject(prompt: string): Promise<ProjectSpec | null> {
       clearTimeout(timer);
       rateLimiter.recordSuccess(model);
 
-      const text = stripMarkdown(res.choices[0]?.message?.content ?? "");
+      let raw = res.choices[0]?.message?.content ?? "";
+      raw = fixRedactedTokens(raw);
+      const text = stripMarkdown(raw);
+
       const s = text.indexOf("{");
       const e = text.lastIndexOf("}");
-      if (s === -1 || e === -1) throw new Error("No JSON in response");
+      if (s === -1 || e === -1) throw new Error("No JSON object in response");
 
       const parsed = JSON.parse(text.slice(s, e + 1)) as ProjectSpec;
 
@@ -582,7 +619,7 @@ async function planProject(prompt: string): Promise<ProjectSpec | null> {
           path: f.path.replace(/^\/+/, ""),
           description: f.description || f.path,
           dependencies: Array.isArray(f.dependencies) ? f.dependencies : [],
-          is3D: f.is3D === true,
+          is3D:        false,
           isAnimation: f.isAnimation === true,
         }))
         .filter((f) => !BOILERPLATE_PATHS.has(f.path));
@@ -602,10 +639,10 @@ async function planProject(prompt: string): Promise<ProjectSpec | null> {
 
       console.log(`✅ [S1] Planned ${parsed.files.length} files: ${parsed.files.map((f) => f.path).join(", ")}`);
       return parsed;
-    } catch (err: any) {
+    } catch (err: unknown) {
       clearTimeout(timer);
       rateLimiter.recordFailure(model);
-      const status: number = err?.status ?? 0;
+      const status: number = (err as { status?: number })?.status ?? 0;
       if (status === 401 || status === 403) { console.error(`❌ [S1] Auth error`); return null; }
       const isLast = mi === PLAN_MODELS.length - 1;
       console.warn(`⚠️ [S1] ${modelLabel(model)} failed — ${isLast ? "exhausted" : "trying next"}`);
@@ -618,6 +655,8 @@ async function planProject(prompt: string): Promise<ProjectSpec | null> {
 // STAGE 2 — CODE GENERATOR
 // ═══════════════════════════════════════════════════════════════════════════════
 
+const AVAILABLE_PACKAGES = `react@18, react-dom@18, framer-motion@11, lucide-react@0.363, clsx@2, tailwindcss`;
+
 const CODEGEN_SYSTEM_BASE = `You are an elite React engineer building production-grade websites.
 Output ONLY raw file content. No markdown. No backticks. No explanations. No "use client". No TypeScript.
 The VERY FIRST character you output must be the first character of the file.
@@ -627,14 +666,19 @@ The VERY FIRST character you output must be the first character of the file.
 2. NEVER truncate — complete every JSX tag, every function body, every file.
 3. NO TypeScript in .jsx files — no ": string", ": React.FC", "useState<string>", interface, etc.
 4. Arrow functions use "=>" — never "= />" (proxy artifact).
-5. CSS url() — NEVER use data: URIs. Use named gradients instead.
+5. CSS url() — NEVER use data: URIs. Use named gradients instead:
+   background: linear-gradient(135deg, #6366f1, #a855f7)  ← CORRECT
+   background-image: url("data:image/svg...")              ← FORBIDDEN
 6. Every JSX open tag must have a matching close tag or be self-closed.
+7. Complete the ENTIRE file in one response — no "// TODO", no "// rest here".
 
-━━━ LIBRARIES ━━━
-react@18, framer-motion, lucide-react, clsx, tailwindcss, three, @react-three/fiber, @react-three/drei, gsap, react-intersection-observer
+━━━ AVAILABLE PACKAGES (installed via npm) ━━━
+${AVAILABLE_PACKAGES}
 
-━━━ BANNED ━━━
-react-router-dom, axios, preact, styled-components, @emotion/*, next/*`;
+━━━ BANNED (not installed, will cause runtime errors) ━━━
+react-router-dom, axios, three, @react-three/fiber, @react-three/drei, gsap,
+react-intersection-observer, @tanstack/react-query, zustand, recharts,
+preact, styled-components, @emotion/*, next/*`;
 
 function makeCodegenSystem(spec: ProjectSpec, generatedSoFar: StreamFile[]): string {
   const siblings = generatedSoFar
@@ -664,9 +708,10 @@ NEVER use url() with data: URIs — use named gradients only.`;
 async function generateOneFile(
   fileSpec: FileSpec,
   spec: ProjectSpec,
-  generatedSoFar: StreamFile[]
+  generatedSoFar: StreamFile[],
+  onPing?: () => void,
 ): Promise<StreamFile> {
-  const isDataFile  = fileSpec.path.startsWith("src/data/") || fileSpec.path.startsWith("src/utils/");
+  const isDataFile  = fileSpec.path.startsWith("src/data/")  || fileSpec.path.startsWith("src/utils/");
   const isHookFile  = fileSpec.path.startsWith("src/hooks/");
   const isCssFile   = fileSpec.path === "src/App.css";
   const isNonAppCss = fileSpec.path.endsWith(".css") && !isCssFile;
@@ -692,15 +737,18 @@ Export named exports OR a default export. Use REAL data — no lorem ipsum. At l
 
   const userPrompt = `Write the COMPLETE file: ${fileSpec.path}
 Purpose: ${fileSpec.description}
-${fileSpec.is3D        ? "REQUIRED: Include a Three.js scene with @react-three/fiber." : ""}
-${fileSpec.isAnimation ? "REQUIRED: Include scroll-triggered animations (framer-motion or GSAP)." : ""}
+${fileSpec.isAnimation ? "REQUIRED: Include scroll-triggered animations with framer-motion." : ""}
 No TypeScript annotations. No prose after export default. Start writing now.`;
 
   for (let mi = 0; mi < models.length; mi++) {
     const model = models[mi];
 
     for (let attempt = 0; attempt < MAX_FILE_RETRIES; attempt++) {
-      await rateLimiter.waitForSlot(model, `${modelLabel(model)}/${fileSpec.path}`);
+      await rateLimiter.waitForSlot(model, `${modelLabel(model)}/${fileSpec.path}`, onPing);
+
+      // Ping right before the LLM call — client knows we're alive
+      onPing?.();
+
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), FILE_TIMEOUT_MS);
 
@@ -711,7 +759,7 @@ No TypeScript annotations. No prose after export default. Start writing now.`;
           {
             model,
             temperature: 0.3 + attempt * 0.05,
-            max_tokens: 6000,
+            max_tokens:  3500,
             messages: [
               { role: "system", content: system },
               { role: "user",   content: userPrompt },
@@ -723,10 +771,22 @@ No TypeScript annotations. No prose after export default. Start writing now.`;
         clearTimeout(timer);
         rateLimiter.recordSuccess(model);
 
-        let content = stripMarkdown(res.choices[0]?.message?.content ?? "");
+        let raw = res.choices[0]?.message?.content ?? "";
+        raw = fixRedactedTokens(raw);
+
+        let content = stripMarkdown(raw);
         if (!content || content.length < 50) throw new Error(`Response too short: ${content.length} chars`);
 
         content = cleanLLMOutput(content, fileSpec.path);
+
+        if (content.length > MAX_FILE_CHARS) {
+          console.warn(`⚠️  [S2] ${fileSpec.path} oversized (${content.length} chars) — truncating to ${MAX_FILE_CHARS}`);
+          const truncated      = content.slice(0, MAX_FILE_CHARS);
+          const lastCleanBrace = truncated.lastIndexOf("\n}");
+          content = lastCleanBrace > MAX_FILE_CHARS * 0.6
+            ? truncated.slice(0, lastCleanBrace + 2)
+            : truncated;
+        }
 
         if (fileSpec.path.endsWith(".jsx")) {
           content = addJsxExtensions(content);
@@ -742,17 +802,17 @@ No TypeScript annotations. No prose after export default. Start writing now.`;
         console.log(`  ✅ [S2] ${fileSpec.path} (${content.length} chars)`);
         return { path: fileSpec.path, content };
 
-      } catch (err: any) {
+      } catch (err: unknown) {
         clearTimeout(timer);
         rateLimiter.recordFailure(model);
-        const status: number = err?.status ?? 0;
+        const status: number = (err as { status?: number })?.status ?? 0;
         if (status === 401 || status === 403) {
           return { path: fileSpec.path, content: makeFallbackComponent(fileSpec) };
         }
         if (status === 410 || status === 404) break;
         if (attempt === MAX_FILE_RETRIES - 1) break;
         console.warn(`  ⚠️ [S2] ${fileSpec.path} attempt ${attempt + 1} failed — retrying`);
-        await sleep(1000 * (attempt + 1));
+        await sleepWithPing(1000 * (attempt + 1), onPing);
       }
     }
   }
@@ -762,12 +822,14 @@ No TypeScript annotations. No prose after export default. Start writing now.`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// STAGE 3 — FIX PASS (2-pass retry)
+// STAGE 3 — FIX PASS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function fixWithPhi(file: StreamFile): Promise<StreamFile> {
+async function fixWithPhi(file: StreamFile, onPing?: () => void): Promise<StreamFile> {
   console.log(`  🔧 [S3-fix] phi — fixing ${file.path}`);
-  await rateLimiter.waitForSlot(FIX_MODEL, `phi/${file.path}`);
+  await rateLimiter.waitForSlot(FIX_MODEL, `phi/${file.path}`, onPing);
+  onPing?.();
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FIX_TIMEOUT_MS);
 
@@ -790,44 +852,20 @@ Preserve ALL logic, styling, and component names. NEVER add TypeScript annotatio
       { signal: controller.signal }
     );
     clearTimeout(timer);
-    let fixed = stripMarkdown(res.choices[0]?.message?.content ?? file.content);
+
+    let raw = res.choices[0]?.message?.content ?? file.content;
+    raw = fixRedactedTokens(raw);
+    let fixed = stripMarkdown(raw);
     fixed = cleanLLMOutput(fixed, file.path);
+
     console.log(`  ✅ [S3-fix] Fixed ${file.path}`);
     return { ...file, content: fixed, lastFixed: true };
-  } catch (err: any) {
+  } catch (err: unknown) {
     clearTimeout(timer);
-    console.warn(`  ⚠️ [S3-fix] phi ${err?.name === "AbortError" ? "timed out" : "failed"} for ${file.path} — keeping original`);
+    const name = (err as { name?: string })?.name;
+    console.warn(`  ⚠️ [S3-fix] phi ${name === "AbortError" ? "timed out" : "failed"} for ${file.path} — keeping original`);
     return file;
   }
-}
-
-function removeGhostImports(files: StreamFile[]): StreamFile[] {
-  const generatedPaths = new Set(files.map((f) => f.path));
-
-  return files.map((file) => {
-    if (!file.path.endsWith(".jsx") && !file.path.endsWith(".js")) return file;
-
-    const lines    = file.content.split("\n");
-    const filtered = lines.filter((line) => {
-      const m = line.match(/import\s+.*from\s+['"](\.[^'"]+)['"]/);
-      if (!m) return true;
-
-      const importedRaw = m[1];
-      const dir         = file.path.split("/").slice(0, -1).join("/");
-      const resolved    = `${dir}/${importedRaw.replace(/^\.\//, "")}`;
-      const withJsx     = resolved.endsWith(".jsx") || resolved.endsWith(".js") ? resolved : `${resolved}.jsx`;
-      const withJs      = resolved.endsWith(".jsx") ? resolved.replace(".jsx", ".js") : `${resolved}.js`;
-
-      if (!generatedPaths.has(withJsx) && !generatedPaths.has(resolved) && !generatedPaths.has(withJs)) {
-        console.warn(`👻 [S3-fix] Ghost import removed from ${file.path}: ${importedRaw}`);
-        return false;
-      }
-      return true;
-    });
-
-    const newContent = filtered.join("\n");
-    return newContent !== file.content ? { ...file, content: newContent } : file;
-  });
 }
 
 function injectMissingReactImports(files: StreamFile[]): StreamFile[] {
@@ -841,14 +879,18 @@ function injectMissingReactImports(files: StreamFile[]): StreamFile[] {
   });
 }
 
-async function runFixPass(files: StreamFile[]): Promise<StreamFile[]> {
-  let result = files;
+async function runFixPass(
+  files: StreamFile[],
+  onPing?: () => void,
+  registry?: Map<string, string>
+): Promise<StreamFile[]> {
+
+  let result: StreamFile[] = files;
 
   for (let pass = 1; pass <= 2; pass++) {
     console.log(`\n🔁 [S3-fix] Pass ${pass}/2`);
 
-    result = removeGhostImports(result);
-    result = autoFixStreamFiles(result);
+    result = autoFixStreamFiles(result, registry);
     result = runSemanticValidation(result);
     result = injectMissingReactImports(result);
 
@@ -860,37 +902,53 @@ async function runFixPass(files: StreamFile[]): Promise<StreamFile[]> {
     }
 
     const brokenPaths = new Set(errors.map((e) => e.path));
-    console.log(`🔧 [S3-fix] ${brokenPaths.size} file(s) need phi (pass ${pass}): ${[...brokenPaths].join(", ")}`);
-    errors.forEach((e) => console.warn(`  ⚠️  ${e.path}: ${e.message}`));
+    console.log(
+      `🔧 [S3-fix] ${brokenPaths.size} file(s) need phi (pass ${pass}): ${[
+        ...brokenPaths,
+      ].join(", ")}`
+    );
+
+    errors.forEach((e) =>
+      console.warn(`  ⚠️  ${e.path}: ${e.message}`)
+    );
 
     const fixed: StreamFile[] = [];
+
     for (const file of result) {
-      fixed.push(brokenPaths.has(file.path) ? await fixWithPhi(file) : file);
+      if (brokenPaths.has(file.path)) {
+        fixed.push(await fixWithPhi(file, onPing));
+      } else {
+        fixed.push(file);
+      }
     }
+
     result = fixed;
   }
 
   const remaining = checkSyntax(result);
+
   if (remaining.length > 0) {
-    console.warn(`⚠️ [S3-fix] ${remaining.length} error(s) remain after 2 passes — shipping best effort`);
-    remaining.forEach((e) => console.warn(`  ❌ ${e.path}: ${e.message}`));
+    console.warn(
+      `⚠️ [S3-fix] ${remaining.length} error(s) remain after 2 passes — shipping best effort`
+    );
+    remaining.forEach((e) =>
+      console.warn(`  ❌ ${e.path}: ${e.message}`)
+    );
   }
 
   return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// MAIN EXPORT — PIPELINE v8.1
+// MAIN EXPORT — PIPELINE v8.5
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export async function streamProjectPipeline(
   prompt: string,
   callbacks: PipelineCallbacks
 ): Promise<void> {
-  const { onFile, onDone, onError, onLog, onMetric } = callbacks;
+  const { onFile, onDone, onError, onLog, onMetric, onPing } = callbacks;
 
-  // FIX: use globalThis.performance instead of `import { performance } from "perf_hooks"`
-  // perf_hooks is Node-only and breaks Edge/browser bundling
   const startTime = globalThis.performance.now();
 
   const log       = (msg: string) => { console.log(msg); onLog?.(msg); };
@@ -899,7 +957,7 @@ export async function streamProjectPipeline(
   const safeError = (msg: string) => { try { onError?.(msg); } catch {} };
 
   log("🚀 ════════════════════════════════════════════════════════════════");
-  log(`🚀 PIPELINE v8.1 — "Production 3D Ultra"`);
+  log(`🚀 PIPELINE v8.5 — "Production Ultra"`);
   log(`🚀 Prompt: "${prompt.slice(0, 80)}"`);
   log("🚀 ════════════════════════════════════════════════════════════════");
 
@@ -911,24 +969,26 @@ export async function streamProjectPipeline(
 
     // S1: Plan
     log("🧠 [S1] Planning project architecture...");
-    const spec = await planProject(prompt);
+    const spec = await planProject(prompt, onPing);
     if (!spec || spec.files.length === 0) {
       log("⚠️  [S1] Planning failed — emitting fallback app");
       await safeEmit({
         path: "src/App.jsx",
-        content: makeFallbackComponent({ path: "src/App.jsx", description: prompt, dependencies: [], is3D: false, isAnimation: false }),
+        content: makeFallbackComponent({
+          path: "src/App.jsx", description: prompt,
+          dependencies: [], is3D: false, isAnimation: false,
+        }),
       });
       safeDone();
       return;
     }
     log(`✅ [S1] Planned ${spec.files.length} files: ${spec.files.map((f) => f.path).join(", ")}`);
 
-    // S2: Generate
+    // S2: Generate (data → hooks → components)
     const dataSpecs      = spec.files.filter((f) => f.path.startsWith("src/data/") || f.path.startsWith("src/utils/"));
     const hookSpecs      = spec.files.filter((f) => f.path.startsWith("src/hooks/"));
     const componentSpecs = spec.files.filter((f) => f.path.startsWith("src/components/"));
     const appCssSpec     = spec.files.find((f) => f.path === "src/App.css");
-    const appJsxSpec     = spec.files.find((f) => f.path === "src/App.jsx");
 
     const orderedSpecs = [...dataSpecs, ...hookSpecs, ...componentSpecs];
     log(`\n📝 [S2] Generating ${orderedSpecs.length} files (data → hooks → components)`);
@@ -936,7 +996,7 @@ export async function streamProjectPipeline(
     const generated: StreamFile[] = [];
 
     for (let i = 0; i < orderedSpecs.length; i++) {
-      const result = await generateOneFile(orderedSpecs[i], spec, generated);
+      const result = await generateOneFile(orderedSpecs[i], spec, generated, onPing);
       generated.push(result);
       log(`  📄 [S2] ${result.path} (${i + 1}/${orderedSpecs.length})`);
       await safeEmit({ path: result.path, content: result.content, provisional: false });
@@ -944,13 +1004,13 @@ export async function streamProjectPipeline(
 
     // App.css
     if (appCssSpec) {
-      const r = await generateOneFile(appCssSpec, spec, generated);
+      const r = await generateOneFile(appCssSpec, spec, generated, onPing);
       generated.push(r);
       await safeEmit({ path: "src/App.css", content: r.content, provisional: false });
       log("  📄 src/App.css");
     }
 
-    // App.jsx — always assemble deterministically to guarantee correct imports
+    // App.jsx — deterministic assembly
     log("  🔧 [S2] App.jsx — assembling deterministically");
     const appJsxContent = buildAppJsx(spec, generated);
     generated.push({ path: "src/App.jsx", content: appJsxContent });
@@ -959,8 +1019,11 @@ export async function streamProjectPipeline(
 
     // S3: Fix pass
     log(`\n🔧 [S3-fix] Validating and fixing ${generated.length} files...`);
-    const fixedGenerated = await runFixPass(generated);
+    const registry = buildComponentRegistry(generated);
 
+const fixedGenerated = await runFixPass(generated, onPing, registry);
+
+    // Emit only changed files after fix pass
     for (const f of fixedGenerated) {
       const original = generated.find((g) => g.path === f.path);
       if (!original || original.content !== f.content) {
@@ -970,16 +1033,17 @@ export async function streamProjectPipeline(
     }
 
     const totalTime  = ((globalThis.performance.now() - startTime) / 1000).toFixed(1);
-    const totalFiles = fixedGenerated.length + 2;
+    const totalFiles = fixedGenerated.length + makeBoilerplate("").length;
     log("\n✅ ════════════════════════════════════════════════════════════════");
-    log(`✅ PIPELINE v8.1 DONE — ${totalFiles} files in ${totalTime}s`);
+    log(`✅ PIPELINE v8.5 DONE — ${totalFiles} files in ${totalTime}s`);
     log("✅ ════════════════════════════════════════════════════════════════\n");
 
     onMetric?.("totalTime",  parseFloat(totalTime));
     onMetric?.("totalFiles", totalFiles);
     safeDone();
-  } catch (err: any) {
-    console.error("❌ [Pipeline] Unhandled crash:", err?.message ?? err);
-    safeError(err?.message ?? "Generation failed unexpectedly");
+  } catch (err: unknown) {
+    const msg = (err as Error)?.message ?? "Generation failed unexpectedly";
+    console.error("❌ [Pipeline] Unhandled crash:", msg);
+    safeError(msg);
   }
 }

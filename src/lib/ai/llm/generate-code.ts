@@ -1,5 +1,3 @@
-
-
 import OpenAI from "openai";
 
 const client = new OpenAI({
@@ -69,7 +67,13 @@ Text: gradient-text
 Only output YOUR app files. ALWAYS include src/App.jsx.
 For extra packages not in the pre-installed list, output a modified package.json with ONLY the new additions.
 
-## STRICT OUTPUT RULES
+## STRICT OUTPUT RULES — ABSOLUTE (violations crash the build)
+- NEVER repeat the same JSX element more than 3 times — use .map() instead
+- THREE.js position prop takes Vec3 [x,y,z] — NEVER 4 values [x,y,z,w]  
+- NEVER put Canvas inside useFrame — Canvas is the root, useFrame goes inside it
+- Each file must have exactly ONE export default
+- Component filenames MUST be valid JS identifiers — never start with a digit
+- NEVER include test files (.test.js) in the output array
 - Return ONLY a valid JSON array — nothing else
 - No markdown fences, no explanation, no preamble, no trailing text
 - No trailing commas anywhere in the JSON
@@ -283,6 +287,21 @@ function sanitizeContent(raw: unknown): string {
 
   let content = typeof raw === "string" ? raw : String(raw);
 
+  // ── SIZE GUARD: if content > 80KB something is catastrophically wrong ──
+  // The WebContainer JSON payload breaks at ~80KB. Hard-cap each file.
+  const MAX_FILE_CHARS = 60_000;
+  if (content.length > MAX_FILE_CHARS) {
+    console.warn(`⚠️  [sanitize] File truncated: ${content.length} chars → ${MAX_FILE_CHARS}`);
+    // Find the last clean line before the limit
+    const cutPoint = content.lastIndexOf("\n", MAX_FILE_CHARS);
+    content = content.slice(0, cutPoint > 0 ? cutPoint : MAX_FILE_CHARS);
+    // Ensure file ends with a valid export
+    if (!content.includes("export default")) {
+      content += "\n\nexport default function Placeholder() { return <div>placeholder</div>; }\n";
+    }
+  }
+
+  // Unescape common escape sequences
   content = content
     .replace(/\\n/g, "\n")
     .replace(/\\t/g, "\t")

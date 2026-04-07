@@ -163,7 +163,7 @@ export function checkSyntax(files: StreamFile[]): SyntaxError[] {
     if (!c) continue;
 
     // url(none)') — the specific corruption pattern from auto-fix leaving stray quotes
-    if (/url\([^)]*\)\s*['")]+/.test(c)) {
+   if (/url\([^)]*\)['"]\s*[;,\s]/.test(c)) {
       errors.push({ path: file.path, message: "Malformed CSS url() expression with trailing quote/paren" });
     }
     // Unclosed data URL
