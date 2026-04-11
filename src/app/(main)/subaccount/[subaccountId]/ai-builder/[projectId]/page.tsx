@@ -59,7 +59,7 @@ const AIProjectPage = async ({ params }: AIProjectPageProps) => {
   // fills whatever height the shell provides, rather than trying to subtract
   // a hardcoded offset that may differ across layout nesting levels.
   return (
-    <div className="w-full h-full">
+    <div style={{ width: "100%", height: "100%" }}>
       <AIWorkspace />
     </div>
   );

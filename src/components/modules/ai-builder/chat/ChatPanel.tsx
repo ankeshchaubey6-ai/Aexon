@@ -2,34 +2,14 @@
 
 // src/components/modules/ai-builder/chat/ChatPanel.tsx
 //
-// v8.5 — Network suspension fix
+// v8.7 — Strict stream/execution phase separation
 //
-// CHANGES from v8.4:
-//   FIX 5 — ERR_NETWORK_IO_SUSPENDED (the main bug)
-//     Root cause: fetch() with a long-lived streaming response body is treated by
-//     Chrome as a "background" request after ~60s with no meaningful data received.
-//     Even though SSE comment pings ": keep-alive\n\n" flow through, Chrome's
-//     network stack classifies them as non-data and may suspend the connection
-//     when the tab loses focus or the OS enters power-save mode.
-//
-//     Fix A — Visibility-aware reconnect:
-//       When the document becomes hidden (tab switch, minimize), we track the
-//       last received byte count. When it becomes visible again, if no new bytes
-//       arrived during the hidden period, we abort and reconnect from where we
-//       left off (file index checkpoint).
-//
-//     Fix B — Dead-man timer:
-//       If no SSE event (data or ping) arrives for 20s, we reconnect.
-//       This is shorter than Chrome's ~45s suspension threshold.
-//
-//     Fix C — Reconnect with checkpoint:
-//       The server is stateless (pipeline runs per-request), so we can't resume
-//       mid-generation. Instead we restart the entire pipeline. The server's
-//       upsert logic means re-generated files overwrite cleanly.
-//       For the UI we keep the file buffer across reconnects so the counter
-//       doesn't reset to zero.
-//
-//   FIX 1-4 from v8.4 are preserved unchanged.
+// CHANGES from v8.6:
+//   - Added streamCompletedRef to prevent reconnect after stream finishes
+//   - In "done" event: set streamCompletedRef = true, abort reader, wait 200ms,
+//     then call commitFiles
+//   - Reconnect loop now returns early if streamCompletedRef is true
+//   - Reset streamCompletedRef on new send
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
@@ -155,6 +135,15 @@ const ChatPanel = () => {
   const activeProjectRef = useRef<string | null>(null);
   const deadTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ─── FIX 2: cancelReaderRef ────────────────────────────────────────────────
+  // Holds a reference to the current reader's cancel function so the
+  // visibilitychange handler can trigger a reconnect by cancelling the reader,
+  // which causes reader.read() to resolve with done:true → "reconnect" return.
+  const cancelReaderRef = useRef<(() => void) | null>(null);
+
+  // v8.7: Stream completion flag to prevent reconnect after done.
+  const streamCompletedRef = useRef(false);
+
   const isEditMode = !!(projectId && storeFiles.length > 0);
 
   // Auto-scroll to latest message.
@@ -210,14 +199,18 @@ const ChatPanel = () => {
     }
   }, []);
 
-  // ─── openStream — open one SSE connection and read until done/error ─────
+  // ─── openStream — open one SSE connection and read until done/reconnect ──
+  //
+  // FIX 3: Return type is "done" | "reconnect" only. Errors that should be
+  // fatal are thrown; errors that indicate a stale/suspended connection
+  // return "reconnect" so the retry loop handles them gracefully.
   const openStream = useCallback(
     async (
       text: string,
       asstId: string,
       activePid: string | null,
       signal: AbortSignal,
-    ): Promise<"done" | "error" | "reconnect"> => {
+    ): Promise<"done" | "reconnect"> => {
       const res = await fetch("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -244,25 +237,35 @@ const ChatPanel = () => {
       const decoder = new TextDecoder();
       let buffer = "";
 
-      // Start the dead-man timer — reconnect if no bytes for 20s
+      // triggerReconnect cancels the reader, which causes the next
+      // reader.read() call to resolve with { done: true } → "reconnect".
       const triggerReconnect = () => {
         reader.cancel().catch(() => {});
       };
+
+      // ─── FIX 2: expose triggerReconnect to the visibilitychange handler ──
+      cancelReaderRef.current = triggerReconnect;
+
+      // Start the dead-man timer.
       resetDeadTimer(triggerReconnect);
 
       try {
         while (true) {
           const { done, value } = await reader.read();
 
-          if (signal.aborted) return "reconnect";
-
-          if (done) {
-            // Stream closed without "done" event — treat as stale connection
-            clearDeadTimer();
+          if (signal.aborted) {
+            cancelReaderRef.current = null;
             return "reconnect";
           }
 
-          // We got bytes — reset the dead-man timer
+          if (done) {
+            // Stream closed without a "done" SSE event — stale connection.
+            clearDeadTimer();
+            cancelReaderRef.current = null;
+            return "reconnect";
+          }
+
+          // Got bytes — reset the dead-man timer.
           resetDeadTimer(triggerReconnect);
 
           buffer += decoder.decode(value, { stream: true });
@@ -272,7 +275,7 @@ const ChatPanel = () => {
           for (const part of parts) {
             const line = part.trim();
 
-            // SSE ping/comment — no-op for parsing but timer already reset above
+            // SSE ping/comment — timer already reset above, nothing to parse.
             if (line.startsWith(":")) continue;
             if (!line.startsWith("data:")) continue;
 
@@ -297,6 +300,13 @@ const ChatPanel = () => {
 
             if (data.type === "done") {
               clearDeadTimer();
+              cancelReaderRef.current = null;
+
+              // v8.7: Mark stream completed, abort reader, and wait before execution.
+              streamCompletedRef.current = true;
+              abortRef.current?.abort();
+              await new Promise((r) => setTimeout(r, 200));
+
               const activePidFinal = activeProjectRef.current ?? activePid;
               commitFiles(bufferedFilesRef.current, `Generated: ${text.slice(0, 40)}`, activePidFinal);
               setIsGenerating(false);
@@ -313,13 +323,35 @@ const ChatPanel = () => {
 
             if (data.type === "error") {
               clearDeadTimer();
+              cancelReaderRef.current = null;
               throw new Error((data.message as string) || "Generation failed");
             }
           }
         }
       } catch (err) {
         clearDeadTimer();
+        cancelReaderRef.current = null;
+
         if (signal.aborted) return "reconnect";
+
+        // ─── FIX 1: treat network-level errors as reconnectable ────────────
+        //
+        // Chrome's ERR_NETWORK_IO_SUSPENDED surfaces as:
+        //   TypeError: "network error"          (fetch/stream kill)
+        //   DOMException name="AbortError"      (reader.cancel() resolving)
+        //
+        // Neither is a true application error. Return "reconnect" so the
+        // retry loop restarts the pipeline instead of surfacing a fatal error.
+        if (
+          err instanceof TypeError ||
+          (err instanceof DOMException && err.name === "AbortError")
+        ) {
+          console.warn("[ChatPanel] Network-level stream error — will reconnect:", err);
+          return "reconnect";
+        }
+
+        // Any other error (e.g. JSON parse of an error payload, API 500) is
+        // genuinely fatal and should propagate to handleGenerateStream.
         throw err;
       }
     },
@@ -339,7 +371,12 @@ const ChatPanel = () => {
         const result = await openStream(text, asstId, activeProjectRef.current, signal);
 
         if (result === "done") return;
-        if (result === "error") throw new Error("Generation failed");
+
+        // v8.7: If stream already completed, stop reconnect loop.
+        if (streamCompletedRef.current) {
+          console.log("[ChatPanel] Stream already completed — stopping reconnect");
+          return;
+        }
 
         // result === "reconnect"
         if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -353,7 +390,7 @@ const ChatPanel = () => {
 
         console.warn(`[ChatPanel] Stream stale — reconnect #${reconnectsRef.current}`);
 
-        // Brief pause before reconnecting to avoid hammering the server
+        // Brief back-off before reconnecting to avoid hammering the server.
         await new Promise((r) => setTimeout(r, 1500 * reconnectsRef.current));
 
         if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -402,12 +439,12 @@ const ChatPanel = () => {
     const text = prompt.trim();
     if (!text || isGenerating) return;
 
-    // Cancel any previous in-flight request
+    // Cancel any previous in-flight request.
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // Hard client deadline
+    // Hard client deadline.
     const deadlineTimer = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
 
     setIsGenerating(true);
@@ -416,6 +453,9 @@ const ChatPanel = () => {
     setReconnectCount(0);
     setPrompt("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+
+    // v8.7: Reset stream completion flag for new request.
+    streamCompletedRef.current = false;
 
     const optUserId = `u-${Date.now()}`;
     const optAsstId = `a-${Date.now()}`;
@@ -449,6 +489,7 @@ const ChatPanel = () => {
       if (!isAbort) console.error("[ChatPanel] Error:", err);
 
       clearDeadTimer();
+      cancelReaderRef.current = null;
       setIsGenerating(false);
       isGeneratingRef.current = false;
       setMessages((prev) =>
@@ -464,9 +505,12 @@ const ChatPanel = () => {
   }, [prompt, isGenerating, isEditMode, handleEditRequest, handleGenerateStream, clearDeadTimer]);
 
   // ─── Visibility-based reconnect ───────────────────────────────────────────
-  // When the tab regains focus, check if the dead-man timer already fired
-  // (which would have cancelled the reader). If we're still "generating"
-  // but isRunning is false, the stream silently died — restart it.
+  //
+  // FIX 2 (continued): When the tab becomes visible again after being hidden,
+  // schedule a dead-man timeout that actually calls cancelReaderRef.current()
+  // if no bytes arrive. reader.cancel() causes reader.read() to resolve with
+  // { done: true }, which openStream returns as "reconnect", which
+  // handleGenerateStream picks up and restarts the pipeline.
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (
@@ -475,18 +519,15 @@ const ChatPanel = () => {
         abortRef.current &&
         !abortRef.current.signal.aborted
       ) {
-        // Nudge the dead-man timer — visibility returning means the tab is live
-        // If the timer hasn't fired yet, reset it so we get a fresh 20s window
-        if (deadTimerRef.current) {
-          clearTimeout(deadTimerRef.current);
-          // The reader is still open; it will call resetDeadTimer on next byte.
-          // If no byte arrives within SSE_DEAD_TIMEOUT_MS the reader self-cancels
-          // and the reconnect loop restarts the stream.
-          deadTimerRef.current = setTimeout(() => {
-            // Reader cancel triggers "done: false" path → "reconnect" result
-            // The while(true) loop in handleGenerateStream picks it up.
-          }, SSE_DEAD_TIMEOUT_MS);
-        }
+        // Clear any existing dead-man timer and set a fresh one.
+        // If no SSE bytes arrive within SSE_DEAD_TIMEOUT_MS, cancel the reader
+        // to trigger the reconnect path.
+        if (deadTimerRef.current) clearTimeout(deadTimerRef.current);
+
+        // ─── FIX 2: was () => {} (empty) — now actually cancels the reader ──
+        deadTimerRef.current = setTimeout(() => {
+          cancelReaderRef.current?.();
+        }, SSE_DEAD_TIMEOUT_MS);
       }
     };
 

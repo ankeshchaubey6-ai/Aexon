@@ -1,6 +1,4 @@
-//=================== FILE: src/lib/ai/llm/editor.ts ====================
-
-// src/lib/ai/llm/kimi-editor.ts
+// src/lib/ai/llm/editor.ts
 import OpenAI from "openai";
 import { AIFileNode } from "../types/ai-project.types";
 
@@ -8,6 +6,28 @@ const client = new OpenAI({
   apiKey: process.env.NVIDIA_API_KEY!,
   baseURL: "https://integrate.api.nvidia.com/v1",
 });
+
+function isUnsafeContent(content: string): boolean {
+  return (
+    /\.css/.test(content) ||
+    /framer-motion/.test(content) ||
+    /lucide-react/.test(content) ||
+    /react-router/.test(content) ||
+    /className=/.test(content)
+  );
+}
+
+function makeSafeFile(path: string): AIFileNode {
+  const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "Component";
+  return {
+    path,
+    type: "file",
+    content: `import React from 'react';
+export default function ${name}() {
+  return <div style={{ padding: 10 }}>${name}</div>;
+}`
+  };
+}
 
 export async function generateEditWithKimi(
   prompt: string,
@@ -23,29 +43,35 @@ export async function generateEditWithKimi(
         {
           role: "system",
           content: `
-You are an expert React developer specializing in code editing and refactoring.
+You are a senior React engineer editing an existing project.
 
-You are given an existing React project. Your task is to modify ONLY what is needed based on the user's request.
-
-STRICT RULES:
-- Return the FULL updated files array with ALL files
-- Do NOT remove unrelated files
-- Keep the existing project structure intact
-- Only modify files that need changes
-- Return ONLY valid JSON array
-- No markdown, no backticks, no explanations
+Return ONLY valid JSON array. No markdown. No explanation.
 
 FORMAT:
 [
-  { "path": "file_path", "content": "updated_file_content" },
-  { "path": "another_file.jsx", "content": "updated_content" }
+  { "path": "file_path", "content": "updated_code" }
 ]
 
-IMPORTANT:
-- Include ALL files, even unchanged ones
-- Preserve all existing functionality
-- Make minimal changes to achieve the goal
-- Ensure the code remains valid and working
+---
+
+STRICT RULES (MANDATORY):
+
+* ONLY React (no Next.js)
+* ONLY inline styles (style={{}})
+* NO CSS files
+* NO Tailwind
+* NO className styling
+* NO external UI libraries
+* NO framer-motion
+* NO lucide-react
+* NO react-router
+* DO NOT introduce new dependencies
+* DO NOT remove existing files
+* Modify ONLY what is required
+* Components must:
+  * export default
+  * return valid JSX
+* If unsafe code is required → DO NOT implement it
 `,
         },
         {
@@ -88,18 +114,33 @@ Return the COMPLETE updated files array.
         return files;
       }
       
-      // Validate each file has required fields
-      const validFiles = parsed.filter((file: any) => 
-        file.path && typeof file.content === 'string'
-      );
+      // Validate and sanitize each file
+      const validFiles = parsed
+        .map((file: any) => {
+          if (!file.path || typeof file.content !== "string") return null;
+          
+          if (isUnsafeContent(file.content)) {
+            console.warn(`⚠️ Unsafe content detected in ${file.path}, replacing with safe fallback`);
+            return makeSafeFile(file.path);
+          }
+          
+          return file;
+        })
+        .filter(Boolean);
       
       if (validFiles.length === 0) {
         console.error("❌ No valid files in AI response");
         return files;
       }
       
-      console.log(`✅ Successfully edited ${validFiles.length} files`);
-      return validFiles;
+      // Ensure no files are lost (merge with original)
+      const merged = files.map(original => {
+        const updated = validFiles.find(f => f.path === original.path);
+        return updated || original;
+      });
+      
+      console.log(`✅ Successfully edited ${merged.length} files`);
+      return merged;
       
     } catch (parseError) {
       console.error("❌ Edit parse failed:", parseError);
@@ -112,5 +153,3 @@ Return the COMPLETE updated files array.
     return files;
   }
 }
-
-

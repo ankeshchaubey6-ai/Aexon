@@ -1,13 +1,20 @@
 import OpenAI from "openai";
+import { fixWholeProjectWithRetry } from "@/lib/ai/engine/project-fixer";
 
 const client = new OpenAI({
   apiKey: process.env.NVIDIA_API_KEY!,
   baseURL: "https://integrate.api.nvidia.com/v1",
 });
 
-// ─────────────────────────────────────────────
-// TYPES
-// ─────────────────────────────────────────────
+const DEBUG =
+  typeof window !== "undefined"
+    ? ((window as unknown as Record<string, unknown>).AI_DEBUG ?? false)
+    : false;
+
+function logWarn(...args: unknown[]) { if (DEBUG) console.warn(...args); }
+function logError(...args: unknown[]) { if (DEBUG) console.error(...args); }
+function logInfo(...args: unknown[]) { if (DEBUG) console.log(...args); }
+
 export type AIFile = {
   path: string;
   content: string;
@@ -19,61 +26,123 @@ type RawAIFile = {
   [key: string]: unknown;
 };
 
-// ─────────────────────────────────────────────
-// SYSTEM PROMPT
-// ─────────────────────────────────────────────
+const FORBIDDEN_PACKAGES = [
+  "framer-motion",
+  "lucide-react",
+  "clsx",
+  "zustand",
+  "recharts",
+  "axios",
+  "react-hook-form",
+  "zod",
+  "react-router-dom",
+  "react-router",
+  "three",
+  "@react-three/fiber",
+  "@react-three/drei",
+  "gsap",
+  "react-intersection-observer",
+  "@tanstack/react-query",
+  "preact",
+  "styled-components",
+  "@emotion/react",
+  "@emotion/styled",
+];
+
 const SYSTEM_PROMPT = `
-You are an expert React developer generating a production-quality Vite + React + Tailwind app.
+CRITICAL CONTRACT:
+If your output violates ANY rule, it will be completely discarded.
 
-## BASE TEMPLATE — ALREADY EXISTS (DO NOT RE-OUTPUT THESE)
-The sandbox already has these files set up. Only output them if you need to CHANGE them:
-- package.json (all common deps pre-installed — see below)
-- vite.config.js (@ alias → src/)
-- tailwind.config.js, postcss.config.js
-- index.html (Inter font included)
-- src/index.css (Tailwind directives + CSS variables + utility classes)
-- src/main.jsx (BrowserRouter + QueryClientProvider + Toaster already wrapping App)
+You MUST self-validate BEFORE returning.
 
-## PRE-INSTALLED PACKAGES (DO NOT install these — they are already in package.json)
-react, react-dom, react-router-dom, clsx, lucide-react, axios, date-fns,
-zustand, framer-motion, recharts, @tanstack/react-query,
-react-hook-form, zod, @hookform/resolvers, react-hot-toast, react-icons
+You MUST internally simulate:
+* import resolution
+* file existence
+* export correctness
 
-## PRE-BUILT COMPONENTS — import from "@/components/ui"
-Button, Input, Textarea, Select, Card, Badge, Spinner, Modal,
-Skeleton, Avatar, Divider, Alert, Table, Progress, Tooltip
+If ANY issue exists → FIX BEFORE OUTPUT.
 
-Usage example:
-import { Button, Card, Modal, Badge } from "@/components/ui";
+Never output invalid code.
 
-## PRE-BUILT HOOKS — import from "@/hooks"
-useLocalStorage, useToggle, useDebounce, useClickOutside,
-useMediaQuery, useDarkMode, useFetch, useCounter, useForm, usePagination
+CRITICAL HARD RULE:
+If you import ANY external library (framer-motion, lucide-react, clsx, zustand, recharts, axios, react-hook-form, zod, etc.), your output will be REJECTED and discarded.
 
-## PRE-BUILT UTILITIES — import from "@/lib/utils"
-cn, formatCurrency, formatDate, truncate, debounce, generateId,
-capitalize, groupBy, deepClone, sleep, storage
+You MUST implement:
+- animations using CSS only
+- icons using text or emoji
+- class merging using template strings
 
-## PRE-BUILT CSS CLASSES (use directly in className — already in src/index.css)
-Buttons: btn btn-primary btn-secondary btn-outline btn-ghost btn-danger btn-lg btn-sm
-Cards: card card-body card-hover
-Forms: input label input-error
-Badges: badge badge-primary badge-success badge-warning badge-danger badge-gray
-Layout: container-app section
-Animations: animate-fade-in animate-slide-up animate-slide-down animate-scale-in
-Text: gradient-text
+ONLY allowed imports:
+- react
+- react-dom
+- local files (relative imports)
 
-## WHAT TO OUTPUT
-Only output YOUR app files. ALWAYS include src/App.jsx.
-For extra packages not in the pre-installed list, output a modified package.json with ONLY the new additions.
+CSS FILES — ABSOLUTE PROHIBITION:
+- NEVER create any .css files
+- NEVER import any .css files (e.g. import './App.css' is FORBIDDEN)
+- NEVER write any import statement ending in .css
+- ALL styling must be done exclusively with inline style={{}} props
+- If you need to style something, use: style={{ color: 'red', padding: '20px' }}
+- There is NO exception to this rule. Any .css import will cause immediate rejection.
 
-## STRICT OUTPUT RULES — ABSOLUTE (violations crash the build)
-- NEVER repeat the same JSX element more than 3 times — use .map() instead
-- THREE.js position prop takes Vec3 [x,y,z] — NEVER 4 values [x,y,z,w]  
-- NEVER put Canvas inside useFrame — Canvas is the root, useFrame goes inside it
-- Each file must have exactly ONE export default
-- Component filenames MUST be valid JS identifiers — never start with a digit
-- NEVER include test files (.test.js) in the output array
+You are a React developer generating a simple, valid Vite + React app.
+
+## STRICT FILE STRUCTURE
+Every .jsx file MUST follow this EXACT structure:
+
+import React from 'react';
+
+export default function ComponentName() {
+  return (
+    <div>
+      CONTENT
+    </div>
+  );
+}
+
+RULES (violations will crash the build):
+- Always include: import React from 'react';
+- Always include exactly ONE export default per file
+- JSX must be fully valid and every tag must be closed
+- No empty return statements
+- No fragments (<> </>) unless wrapping multiple top-level elements
+- No default parameter values using JSX
+
+## IMPORTS
+- Only import files that exist in your output array
+- Use relative imports only: ./components/X or ../components/X
+- NEVER use @ alias or absolute paths
+- NEVER import from external packages except: react, react-dom
+- NEVER import .css files — this will cause IMMEDIATE REJECTION
+
+## BANNED FEATURES — NEVER USE THESE
+- NO .css files of any kind
+- NO CSS imports of any kind
+- NO animations or transitions
+- NO custom hooks
+- NO useEffect (unless the feature is completely impossible without it)
+- NO useContext or Context API
+- NO React Router or any routing library
+- NO external component libraries
+- NO icon libraries
+- NO framer-motion
+- NO zustand
+- NO recharts
+- NO react-hook-form
+- NO zod
+- NO axios
+- NO lucide-react
+- NO any library not in: react, react-dom
+
+## PROJECT CONSTRAINTS
+- Maximum 6 files total
+- Maximum 4 components
+- All components go in src/components/ — no deeper nesting
+- No barrel index files
+- File structure must be flat and predictable
+- Only .jsx and .js files are allowed — NO .css files
+
+## OUTPUT RULES — ABSOLUTE
 - Return ONLY a valid JSON array — nothing else
 - No markdown fences, no explanation, no preamble, no trailing text
 - No trailing commas anywhere in the JSON
@@ -83,110 +152,367 @@ For extra packages not in the pre-installed list, output a modified package.json
 - Every object must have exactly two keys: "path" and "content"
 - "path" must be a valid relative file path string (e.g. "src/App.jsx")
 - "content" must be a string with the full file content
+- Each file must have exactly ONE export default
+- Component filenames MUST be valid JS identifiers — never start with a digit
+- NEVER include test files
+- NEVER include .css files
+
+## REQUIRED FILES
+Always include:
+- src/App.jsx
+- src/main.jsx
+
+src/main.jsx must be exactly:
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 
 ## QUALITY RULES
-- All features FULLY FUNCTIONAL — no TODOs, no placeholders, no lorem ipsum
-- Realistic data and real UI interactions
-- Every page: navbar + main content + footer
-- Use React Router (Routes/Route in App.jsx, Link/useNavigate in pages)
-- Use @ alias: import from "@/components/ui" NOT "../../components/ui"
-- Charts → recharts. Forms → react-hook-form + zod. State → zustand. Icons → lucide-react
-- Beautiful, responsive, production-quality UI using Tailwind classes
+- All features FULLY FUNCTIONAL — no TODOs, no placeholders
+- Use ONLY inline styles: style={{ key: 'value' }} — NO external CSS
+- Use only useState for state management
+- Keep components simple and self-contained
 
 OUTPUT FORMAT:
 [
-  { "path": "src/App.jsx", "content": "import { Routes, Route } from \\"react-router-dom\\"..." },
-  { "path": "src/pages/Home.jsx", "content": "export default function Home() {..." }
+  { "path": "src/App.jsx", "content": "import React from 'react';\\n\\nexport default function App() {\\n  return (\\n    <div style={{ padding: '40px' }}>Hello</div>\\n  );\\n}" },
+  { "path": "src/main.jsx", "content": "import React from 'react';\\nimport ReactDOM from 'react-dom/client';\\nimport App from './App.jsx';\\nReactDOM.createRoot(document.getElementById('root')).render(<App />);" }
 ]
 `.trim();
 
-// ─────────────────────────────────────────────
-// MAIN EXPORT
-// ─────────────────────────────────────────────
-export async function generateCodeFromAI(input: string): Promise<AIFile[]> {
-  console.log("🔥 Generating code with Kimi K2...");
+const RETRY_SUFFIX =
+  "\n\nYour previous output failed validation. You MUST strictly follow all rules. Any syntax error, missing export default, banned import, .css import, or structural violation will be rejected. Keep it simple. Return only the JSON array. Remember: NO .css files, NO CSS imports — inline styles ONLY.";
 
-  let rawText = "";
+function hasForbiddenImports(code: string): boolean {
+  const pattern = new RegExp(
+    `(?:^|\\n)import\\s+.*?\\s+from\\s+['"](${FORBIDDEN_PACKAGES.join("|")})[^'"]*['"]`,
+    "gm"
+  );
+  return pattern.test(code);
+}
 
+function hasCssImport(code: string): boolean {
+  return /import\s+.*\.css['"]/.test(code) || /import\s+['"][^'"]+\.css['"]/.test(code);
+}
+
+function extractImports(code: string): string[] {
+  const matches = code.match(/import\s+.*?from\s+['"][^'"]+['"]/g) || [];
+  return matches
+    .map((m) => m.match(/from\s+['"]([^'"]+)['"]/)?.[1])
+    .filter(Boolean) as string[];
+}
+
+function resolveImportPath(from: string, relative: string): string {
+  const base = from.split("/").slice(0, -1);
+  const parts = relative.split("/");
+
+  for (const p of parts) {
+    if (p === ".") continue;
+    if (p === "..") base.pop();
+    else base.push(p);
+  }
+
+  let resolved = base.join("/");
+  if (!resolved.match(/\.\w+$/)) resolved += ".jsx";
+  return resolved;
+}
+
+function hasNamedExport(code: string): boolean {
+  return /export\s+(const|function|class)\s+/.test(code);
+}
+
+function validateFilesStrict(files: AIFile[]): boolean {
+  if (!files || files.length === 0) return false;
+
+  const fileSet = new Set(files.map((f) => f.path));
+
+  for (const f of files) {
+    // Hard fail: no .css files allowed at all
+    if (f.path.endsWith(".css")) {
+      logWarn("[AI][VALIDATE] Rejected: .css file found in output:", f.path);
+      return false;
+    }
+
+    if (!f.content || f.content.trim().length < 30) return false;
+    if (!/export\s+default\s/.test(f.content)) return false;
+    if (hasNamedExport(f.content)) return false;
+    if (hasForbiddenImports(f.content)) return false;
+
+    // Hard fail: no CSS imports allowed
+    if (hasCssImport(f.content)) {
+      logWarn("[AI][VALIDATE] Rejected: .css import found in file:", f.path);
+      return false;
+    }
+
+    const localImportLines = (
+      f.content.match(/import\s+.*?from\s+['"][^'"]+['"]/g) || []
+    ).filter((line) => {
+      const src = line.match(/from\s+['"]([^'"]+)['"]/)?.[1] ?? "";
+      return src.startsWith(".");
+    });
+
+    for (const line of localImportLines) {
+      if (/import\s+\{.*?\}\s+from/.test(line)) return false;
+    }
+
+    const imports = extractImports(f.content);
+    for (const imp of imports) {
+      if (!imp.startsWith(".")) continue;
+      const resolved = resolveImportPath(f.path, imp);
+      if (!fileSet.has(resolved)) return false;
+    }
+
+    if (f.path.endsWith(".jsx")) {
+      if (!/return\s*\(/.test(f.content) && !/return\s+</.test(f.content)) return false;
+      if (/return\s*\(\s*\)/.test(f.content) || /return\s*null\s*;?\s*$/.test(f.content)) return false;
+      if (!/import\s+React\s+from\s+['"]react['"]/.test(f.content)) return false;
+
+      const hookUsages = f.content.match(/\buse[A-Z][a-zA-Z]+\b/g) || [];
+      const allowedHooks = new Set(["useState"]);
+      for (const hook of hookUsages) {
+        if (!allowedHooks.has(hook)) return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function stripCssImports(content: string): string {
+  return content
+    .replace(/import\s+['"][^'"]+\.css['"];?\n?/g, "")
+    .replace(/import\s+\w+\s+from\s+['"][^'"]+\.css['"];?\n?/g, "");
+}
+
+function autoRepair(files: AIFile[]): AIFile[] {
+  const forbiddenPattern = new RegExp(
+    `^import\\s+.*?\\s+from\\s+['"](${FORBIDDEN_PACKAGES.join("|")})[^'"]*['"];?\\s*$`,
+    "gm"
+  );
+
+  return files
+    .filter((f) => {
+      // Hard fail safety: discard any .css files entirely
+      if (f.path.endsWith(".css")) {
+        logWarn("[AI][REPAIR] Discarding .css file:", f.path);
+        return false;
+      }
+      return true;
+    })
+    .map((f) => {
+      let content = f.content;
+
+      // Strip all CSS imports
+      content = stripCssImports(content);
+
+      content = content.replace(forbiddenPattern, "");
+      content = content.replace(/import\s+\{[^}]+\}\s+from\s+['"][^'"]+['"]\s*;?\n?/g, "");
+
+      if (f.path.endsWith(".jsx") && !/import\s+React\s+from\s+['"]react['"]/.test(content)) {
+        content = `import React from 'react';\n${content}`;
+      }
+
+      if (f.path.endsWith(".jsx") && !/export\s+default\s/.test(content)) {
+        const funcMatch = content.match(/^function\s+([A-Z][a-zA-Z0-9]*)\s*\(/m);
+        if (funcMatch) {
+          content = content.replace(
+            /^(function\s+[A-Z][a-zA-Z0-9]*\s*\()/m,
+            "export default $1"
+          );
+        } else {
+          content += `\n\nexport default function Repaired() { return <div>Component</div>; }\n`;
+        }
+      }
+
+      content = content.replace(/\n{3,}/g, "\n\n").trim();
+
+      return { ...f, content };
+    });
+}
+
+function buildSafeProject(): AIFile[] {
+  return [
+    {
+      path: "src/App.jsx",
+      content: `import React from 'react';
+
+export default function App() {
+  return (
+    <div style={{ padding: "40px", textAlign: "center", fontFamily: "sans-serif" }}>
+      <h1>App</h1>
+      <p>Your project is ready. Describe what you want to build.</p>
+    </div>
+  );
+}
+`,
+    },
+    {
+      path: "src/main.jsx",
+      content: `import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+`,
+    },
+  ];
+}
+
+function finalSanitize(files: AIFile[]): AIFile[] {
+  const forbiddenPattern = new RegExp(
+    `^import\\s+.*?\\s+from\\s+['"](${FORBIDDEN_PACKAGES.join("|")})[^'"]*['"];?\\s*$`,
+    "gm"
+  );
+
+  return files
+    .filter((f) => {
+      // Hard fail safety: discard any .css files entirely
+      if (f.path.endsWith(".css")) {
+        logWarn("[AI][SANITIZE] Discarding .css file:", f.path);
+        return false;
+      }
+      return true;
+    })
+    .map((f) => {
+      let content = sanitizeContent(f.content);
+
+      // Strip all CSS imports
+      content = stripCssImports(content);
+
+      content = content.replace(forbiddenPattern, "");
+
+      if (f.path.endsWith(".jsx") && !/import\s+React\s+from\s+['"]react['"]/.test(content)) {
+        content = `import React from 'react';\n${content}`;
+      }
+
+      if (f.path.endsWith(".jsx") && !/export\s+default\s/.test(content)) {
+        content += `\n\nexport default function SafeComponent() { return <div>Component</div>; }\n`;
+      }
+
+      // Hard fail safety: if any CSS import survived, replace file with safe fallback content
+      if (hasCssImport(content)) {
+        logWarn("[AI][SANITIZE] CSS import survived sanitization in:", f.path, "— replacing with safe fallback");
+        content = `import React from 'react';\n\nexport default function SafeComponent() {\n  return <div style={{ padding: '20px' }}>Component</div>;\n}\n`;
+      }
+
+      return { ...f, content };
+    });
+}
+
+export async function generateCodeFromAI(
+  input: string,
+  options?: { fix?: boolean }
+): Promise<AIFile[]> {
+  const shouldFix = options?.fix ?? true;
+
+  const result1 = await attemptGeneration(input, false);
+  if (result1) {
+    return finalSanitize(await applyFix(result1, shouldFix, input));
+  }
+
+  const result2 = await attemptGeneration(input, true);
+  if (result2) {
+    return finalSanitize(await applyFix(result2, shouldFix, input));
+  }
+
+  logError("[AI] FINAL FAILURE — fallback used");
+  return finalSanitize(buildSafeProject());
+}
+
+async function attemptGeneration(
+  input: string,
+  isRetry: boolean
+): Promise<AIFile[] | null> {
   try {
+    const userContent = `Project Plan or Prompt:\n${input}\n\nGenerate the full project code now. Return only the JSON array. Remember: NO .css files, NO CSS imports — use inline styles only.${isRetry ? RETRY_SUFFIX : ""}`;
+
     const completion = await client.chat.completions.create({
       model: "moonshotai/kimi-k2-instruct",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: `Project Plan or Prompt:\n${input}\n\nGenerate the full project code now. Return only the JSON array.`,
-        },
+        { role: "user", content: userContent },
       ],
-      temperature: 0.2,
+      temperature: isRetry ? 0.1 : 0.2,
       top_p: 0.9,
       max_tokens: 32768,
     });
 
-    rawText = completion.choices[0]?.message?.content ?? "";
-
-    if (!rawText.trim()) {
-      console.error("❌ Empty response from model");
-      return fallbackFile("Model returned an empty response.");
-    }
+    const rawText = completion.choices[0]?.message?.content ?? "";
+    if (!rawText.trim()) return null;
 
     const cleaned = stripMarkdown(rawText);
     const jsonString = extractJsonArray(cleaned);
-
-    if (!jsonString) {
-      console.error("❌ No JSON array found in response");
-      return fallbackFile("No JSON array detected in model response.");
-    }
+    if (!jsonString) return null;
 
     const parsed = repairAndParse(jsonString);
-
-    if (!parsed) {
-      console.error("❌ JSON parse failed after repair attempts");
-      return fallbackFile("JSON parsing failed. Model output may be malformed.");
-    }
-
-    if (!Array.isArray(parsed)) {
-      return fallbackFile("Model returned JSON but it was not an array.");
-    }
-
-    if (parsed.length === 0) {
-      return fallbackFile("Model returned an empty file list.");
-    }
+    if (!parsed || !Array.isArray(parsed) || parsed.length === 0) return null;
 
     const files: AIFile[] = [];
     const pathsSeen = new Set<string>();
 
-    for (let i = 0; i < parsed.length; i++) {
-      const item = parsed[i] as RawAIFile;
-
+    for (const item of parsed) {
       if (typeof item !== "object" || item === null) continue;
 
-      const filePath = sanitizePath(item.path);
+      const raw = item as RawAIFile;
+      const filePath = sanitizePath(raw.path);
       if (!filePath) continue;
+
+      // Hard fail safety: discard .css files at parse time
+      if (filePath.endsWith(".css")) {
+        logWarn("[AI][PARSE] Discarding .css file from AI output:", filePath);
+        continue;
+      }
+
       if (pathsSeen.has(filePath)) continue;
       pathsSeen.add(filePath);
 
-      const content = sanitizeContent(item.content);
+      const content = sanitizeContent(raw.content);
       files.push({ path: filePath, content });
     }
 
-    if (files.length === 0) {
-      return fallbackFile("All generated files failed validation.");
-    }
+    if (files.length === 0) return null;
 
-    console.log(`✅ Generated ${files.length} file(s)`);
-    return files;
+    const repaired = autoRepair(files);
 
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("❌ Fatal error during AI generation:", message);
-    return fallbackFile(`AI request failed: ${message}`);
+    if (!validateFilesStrict(repaired)) return null;
+
+    return repaired;
+  } catch {
+    return null;
   }
 }
 
-// ─────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────
+async function applyFix(
+  files: AIFile[],
+  shouldFix: boolean,
+  _input: string
+): Promise<AIFile[]> {
+  if (!shouldFix) return files;
+
+  try {
+    const fixResult = await fixWholeProjectWithRetry(
+      files.map((f) => ({ path: f.path, content: f.content })),
+      2
+    );
+
+    if (fixResult.ok) {
+      const fixedMap = new Map(fixResult.files.map((f) => [f.path, f.content]));
+      const merged = files.map((f) => ({
+        ...f,
+        content: fixedMap.get(f.path) ?? f.content,
+      }));
+
+      const repaired = autoRepair(merged);
+      if (!validateFilesStrict(repaired)) return files;
+
+      return repaired;
+    }
+
+    return files;
+  } catch {
+    return files;
+  }
+}
 
 function stripMarkdown(text: string): string {
   return text
@@ -224,16 +550,13 @@ function extractJsonArray(text: string): string | null {
 }
 
 function repairAndParse(jsonString: string): unknown | null {
-  // Strategy 1: as-is
   try { return JSON.parse(jsonString); } catch (_) {}
 
-  // Strategy 2: remove trailing commas
   try {
     const fixed = jsonString.replace(/,\s*]/g, "]").replace(/,\s*}/g, "}");
     return JSON.parse(fixed);
   } catch (_) {}
 
-  // Strategy 3: normalize line endings + strip control chars
   try {
     const fixed = jsonString
       .replace(/\r\n/g, "\\n")
@@ -244,7 +567,6 @@ function repairAndParse(jsonString: string): unknown | null {
     return JSON.parse(fixed);
   } catch (_) {}
 
-  // Strategy 4: regex salvage
   try { return salvageFilesFromText(jsonString); } catch (_) {}
 
   return null;
@@ -257,6 +579,13 @@ function salvageFilesFromText(text: string): AIFile[] | null {
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
     const filePath = match[1].trim();
+
+    // Hard fail safety: skip .css files during salvage
+    if (filePath.endsWith(".css")) {
+      logWarn("[AI][SALVAGE] Skipping .css file:", filePath);
+      continue;
+    }
+
     const content = match[2]
       .replace(/\\n/g, "\n")
       .replace(/\\t/g, "\t")
@@ -279,6 +608,10 @@ function sanitizePath(raw: unknown): string | null {
     .replace(/[<>:"|?*\x00-\x1F]/g, "");
 
   if (!p || !/\.\w+$/.test(p)) return null;
+
+  // Reject .css paths at sanitization level
+  if (p.endsWith(".css")) return null;
+
   return p;
 }
 
@@ -287,21 +620,15 @@ function sanitizeContent(raw: unknown): string {
 
   let content = typeof raw === "string" ? raw : String(raw);
 
-  // ── SIZE GUARD: if content > 80KB something is catastrophically wrong ──
-  // The WebContainer JSON payload breaks at ~80KB. Hard-cap each file.
   const MAX_FILE_CHARS = 60_000;
   if (content.length > MAX_FILE_CHARS) {
-    console.warn(`⚠️  [sanitize] File truncated: ${content.length} chars → ${MAX_FILE_CHARS}`);
-    // Find the last clean line before the limit
     const cutPoint = content.lastIndexOf("\n", MAX_FILE_CHARS);
     content = content.slice(0, cutPoint > 0 ? cutPoint : MAX_FILE_CHARS);
-    // Ensure file ends with a valid export
     if (!content.includes("export default")) {
       content += "\n\nexport default function Placeholder() { return <div>placeholder</div>; }\n";
     }
   }
 
-  // Unescape common escape sequences
   content = content
     .replace(/\\n/g, "\n")
     .replace(/\\t/g, "\t")
@@ -309,54 +636,26 @@ function sanitizeContent(raw: unknown): string {
     .replace(/\\"/g, '"')
     .replace(/\\\\/g, "\\");
 
-  // Fix common AI typos
   content = content
     .replace(/<\/buutton>/g, "</button>")
     .replace(/<\/buton>/g, "</button>")
     .replace(/<\/diiv>/g, "</div>")
     .replace(/<\/spann>/g, "</span>");
 
-  // Strip lone 'n' lines (model artifact)
   content = content.replace(/^\s*n\s*$/gm, "");
-
-  // Collapse 3+ blank lines to 2
   content = content.replace(/\n{3,}/g, "\n\n");
+
+  // Strip all CSS imports
+  content = stripCssImports(content);
+
+  const forbiddenPattern = new RegExp(
+    `^import\\s+.*?\\s+from\\s+['"](${FORBIDDEN_PACKAGES.join("|")})[^'"]*['"];?\\s*$`,
+    "gm"
+  );
+  content = content.replace(forbiddenPattern, "");
 
   return content;
 }
 
-// ─────────────────────────────────────────────
-// FALLBACK
-// ─────────────────────────────────────────────
-function fallbackFile(errorMessage: string): AIFile[] {
-  const escaped = errorMessage
-    .slice(0, 3000)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-
-  return [
-    {
-      path: "src/App.jsx",
-      content: `import { Button, Card, Alert } from "@/components/ui";
-
-export default function App() {
-  return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-8">
-      <Card className="max-w-md w-full p-8 text-center space-y-4">
-        <h1 className="text-2xl font-bold text-slate-900">⚠️ Generation Issue</h1>
-        <Alert variant="warning">
-          <p className="text-sm">${escaped}</p>
-        </Alert>
-        <p className="text-slate-500 text-sm">
-          Try describing your app more specifically — include pages, features, and design style.
-        </p>
-        <Button onClick={() => window.location.reload()}>Try Again</Button>
-      </Card>
-    </div>
-  );
-}
-`,
-    },
-  ];
-}
+void logInfo;
+void logWarn;

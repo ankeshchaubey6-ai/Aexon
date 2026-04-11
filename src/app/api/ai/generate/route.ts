@@ -23,6 +23,27 @@ import { AIFileNode } from "@/lib/ai/types/ai-project.types";
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
+// ─── Safety helpers ───────────────────────────────────────────────────────────
+function isUnsafeFile(content: string): boolean {
+  return (
+    content.includes(".css") ||
+    content.includes("framer-motion") ||
+    content.includes("lucide-react")
+  );
+}
+
+function makeSafeFile(path: string): AIFileNode {
+  const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "Component";
+  return {
+    path,
+    type: "file",
+    content: `import React from 'react';
+export default function ${name}() {
+  return <div>${name}</div>;
+}`,
+  };
+}
+
 export async function POST(req: NextRequest) {
   // ───────────── AUTH ─────────────
   const clerkUser = await currentUser();
@@ -119,10 +140,16 @@ export async function POST(req: NextRequest) {
         // ── Run pipeline with all required callbacks ──
         await streamProjectPipeline(prompt, {
           onFile: async (file) => {
-            const existing = allFiles.findIndex((f) => f.path === file.path);
+            // ── Safety: replace unsafe files before emitting ──
+            let safeFile = file;
+            if (isUnsafeFile(file.content)) {
+              safeFile = { ...file, ...makeSafeFile(file.path) };
+            }
+
+            const existing = allFiles.findIndex((f) => f.path === safeFile.path);
             const node: AIFileNode = {
-              path: file.path,
-              content: file.content,
+              path: safeFile.path,
+              content: safeFile.content,
               type: "file",
             };
             if (existing >= 0) {
@@ -133,10 +160,10 @@ export async function POST(req: NextRequest) {
 
             send({
               type: "file",
-              path: file.path,
-              content: file.content,
-              provisional: file.provisional ?? false,
-              size: file.content.length,
+              path: safeFile.path,
+              content: safeFile.content,
+              provisional: safeFile.provisional ?? false,
+              size: safeFile.content.length,
             });
           },
 
@@ -156,23 +183,28 @@ export async function POST(req: NextRequest) {
           },
         });
 
+        // ── Final safety before DB save: replace any unsafe files ──
+        const safeFiles = allFiles.map((f) =>
+          isUnsafeFile(f.content) ? makeSafeFile(f.path) : f
+        );
+
         // ── Save ALL files to DB once generation is complete ──
-        if (allFiles.length > 0) {
+        if (safeFiles.length > 0) {
           try {
-            await upsertAIProjectFiles(projectId, allFiles);
-            console.log(`✅ Saved ${allFiles.length} files to DB for project ${projectId}`);
+            await upsertAIProjectFiles(projectId, safeFiles);
+            console.log(`✅ Saved ${safeFiles.length} files to DB for project ${projectId}`);
           } catch (dbErr) {
             console.error("⚠️ DB save failed:", dbErr);
           }
         }
 
-        send({ type: "done", fileCount: allFiles.length, projectId });
+        send({ type: "done", fileCount: safeFiles.length, projectId });
       } catch (err) {
         const msg = (err as Error)?.message ?? "Generation failed";
         console.error("❌ [generate/stream] crash:", msg);
         send({ type: "error", message: msg });
 
-        // Emit safe fallback files
+        // Emit safe fallback files (CSS-free)
         const fallback = makeFallbackFiles(prompt);
         for (const f of fallback) {
           send({
@@ -201,7 +233,7 @@ export async function POST(req: NextRequest) {
   });
 }
 
-// ─── Fallback files (same as before) ──────────────────────────────────────────
+// ─── Fallback files (CSS-free, inline styles only) ────────────────────────────
 function makeFallbackFiles(prompt: string): AIFileNode[] {
   const label = prompt.slice(0, 40).replace(/'/g, "\\'");
   return [
@@ -243,12 +275,7 @@ function makeFallbackFiles(prompt: string): AIFileNode[] {
     },
     {
       path: "src/App.jsx",
-      content: `import React from 'react';\nexport default function App() { return <div style={{padding:'2rem',fontFamily:'sans-serif'}}><h1>${label}</h1><p style={{color:'#888'}}>Generation failed — please try again.</p></div>; }`,
-      type: "file",
-    },
-    {
-      path: "src/App.css",
-      content: "* { box-sizing: border-box; }\nbody { margin: 0; }",
+      content: `import React from 'react';\nexport default function App() { return <div style={{padding:'2rem',fontFamily:'sans-serif',color:'#111',background:'#fff'}}><h1 style={{marginBottom:'0.5rem'}}>${label}</h1><p style={{color:'#666'}}>Generation failed — please try again.</p></div>; }`,
       type: "file",
     },
   ];

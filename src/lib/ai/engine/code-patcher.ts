@@ -1,132 +1,213 @@
 //==================== FILE: src/lib/ai/engine/code-patcher.ts ====================
 
-// src/lib/ai/engine/code-patcher.ts
-import { AIFileNode, AIEditResponse, AIFileValidation } from "../types/ai-project.types";
+import {
+  AIFileNode,
+  AIFileValidation,
+} from "../types/ai-project.types";
 
 export class CodePatcher {
+
+  // ─────────────────────────────────────────────────────────────
+  // MAIN PATCH
+  // ─────────────────────────────────────────────────────────────
+
   static patch(existingFiles: AIFileNode[], instructions: string): AIFileNode[] {
-    const patchedFiles = [...existingFiles];
-    
-    // Validate files before patching
-    const validation = this.validateFiles(patchedFiles);
+    if (!existingFiles || existingFiles.length === 0) {
+      throw new Error("❌ No files to patch");
+    }
+
+    const files = structuredClone(existingFiles);
+
+    // Validate first
+    const validation = this.validateFiles(files);
     if (!validation.isValid) {
-      console.warn("Validation warnings:", validation.warnings);
+      console.warn("⚠️ Validation issues:", validation.errors);
     }
-    
-    // Add edit metadata
-    const editMetadata = {
+
+    const metadata = {
       timestamp: new Date().toISOString(),
-      instructions: instructions,
-      editedBy: "AI Assistant"
+      instructions: this.safeText(instructions),
+      editedBy: "AI Assistant",
     };
-    
-    // Find and patch main App component
-    const appIndex = patchedFiles.findIndex(f => f.path === "src/App.jsx");
-    if (appIndex !== -1) {
-      patchedFiles[appIndex] = this.patchAppComponent(
-        patchedFiles[appIndex],
-        editMetadata
-      );
+
+    // Patch App.jsx safely
+    const index = files.findIndex((f) => f.path === "src/App.jsx");
+
+    if (index !== -1) {
+      files[index] = this.patchAppComponent(files[index], metadata);
     }
-    
-    // Add a changelog file
-    patchedFiles.push({
-      path: "CHANGELOG.md",
-      content: this.generateChangelog(editMetadata),
-      type: "file"
-    });
-    
-    return patchedFiles;
+
+    // Update or create changelog
+    this.upsertChangelog(files, metadata);
+
+    return files;
   }
 
-  // Fixed: Made this async and properly typed
+  // ─────────────────────────────────────────────────────────────
+  // AI PATCH (REAL, NOT FAKE)
+  // ─────────────────────────────────────────────────────────────
+
   static async patchWithAI(
     existingFiles: AIFileNode[],
     instructions: string,
     aiClient: any
   ): Promise<AIFileNode[]> {
-    // This would use AI to intelligently modify files
-    // For now, returns the basic patch
-    // Simulate async operation
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        resolve(this.patch(existingFiles, instructions));
-      }, 100);
-    });
+
+    if (!aiClient) {
+      throw new Error("❌ AI client required");
+    }
+
+    try {
+      const response = await aiClient.generate({
+        prompt: instructions,
+        files: existingFiles,
+      });
+
+      if (!response || !Array.isArray(response.files)) {
+        throw new Error("Invalid AI response");
+      }
+
+      return response.files;
+    } catch (err) {
+      console.warn("⚠️ AI patch failed, fallback to basic patch");
+      return this.patch(existingFiles, instructions);
+    }
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // SAFE PATCHING
+  // ─────────────────────────────────────────────────────────────
 
   private static patchAppComponent(
     file: AIFileNode,
-    metadata: any
+    metadata: { timestamp: string; instructions: string }
   ): AIFileNode {
-    const editComment = `
+
+    if (!file.content.includes("export default")) {
+      return file; // avoid corrupting non-component files
+    }
+
+    const header = `
 // ============================================
 // 🔧 AI EDIT: ${metadata.timestamp}
 // Instructions: ${metadata.instructions}
 // ============================================
 
 `;
+
+    // Prevent duplicate headers
+    if (file.content.includes("🔧 AI EDIT")) {
+      return file;
+    }
+
     return {
       ...file,
-      content: editComment + file.content
+      content: header + file.content,
     };
   }
 
-  private static generateChangelog(metadata: any): string {
-    return `# Changelog
+  // ─────────────────────────────────────────────────────────────
+  // CHANGELOG HANDLING
+  // ─────────────────────────────────────────────────────────────
 
+  private static upsertChangelog(
+    files: AIFileNode[],
+    metadata: { timestamp: string; instructions: string; editedBy: string }
+  ) {
+
+    const existing = files.find((f) => f.path === "CHANGELOG.md");
+
+    const entry = `
 ## [${metadata.timestamp}]
-### AI Generated Edit
-- **Instructions:** ${metadata.instructions}
-- **Edited by:** ${metadata.editedBy}
+- Instructions: ${metadata.instructions}
+- Edited by: ${metadata.editedBy}
+`;
 
-This edit was automatically generated by the AI Assistant.
-    `;
+    if (existing) {
+      existing.content += entry;
+    } else {
+      files.push({
+        path: "CHANGELOG.md",
+        content: `# Changelog\n${entry}`,
+        type: "file",
+      });
+    }
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // VALIDATION
+  // ─────────────────────────────────────────────────────────────
 
   static validateFiles(files: AIFileNode[]): AIFileValidation {
     const errors: string[] = [];
     const warnings: string[] = [];
-    
-    files.forEach(file => {
+
+    const seen = new Set<string>();
+
+    for (const file of files) {
       if (!file.path) {
-        errors.push(`File missing path`);
+        errors.push("File missing path");
       }
-      if (!file.content && file.content !== "") {
-        errors.push(`File ${file.path} missing content`);
+
+      if (seen.has(file.path)) {
+        errors.push(`Duplicate file path: ${file.path}`);
       }
+      seen.add(file.path);
+
+      if (file.content == null) {
+        errors.push(`Missing content: ${file.path}`);
+      }
+
       if (file.content && file.content.length > 1024 * 1024) {
-        warnings.push(`File ${file.path} is very large (>1MB)`);
+        warnings.push(`Large file: ${file.path}`);
       }
-    });
-    
+    }
+
     return {
       isValid: errors.length === 0,
       errors,
-      warnings
+      warnings,
     };
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // DIFF TRACKING
+  // ─────────────────────────────────────────────────────────────
 
   static getChanges(
     oldFiles: AIFileNode[],
     newFiles: AIFileNode[]
   ): { added: string[]; modified: string[]; deleted: string[] } {
-    const oldPaths = new Set(oldFiles.map(f => f.path));
-    const newPaths = new Set(newFiles.map(f => f.path));
-    
-    const added = [...newPaths].filter(p => !oldPaths.has(p));
-    const deleted = [...oldPaths].filter(p => !newPaths.has(p));
-    
+
+    const oldMap = new Map(oldFiles.map((f) => [f.path, f.content]));
+    const newMap = new Map(newFiles.map((f) => [f.path, f.content]));
+
+    const added: string[] = [];
     const modified: string[] = [];
-    newFiles.forEach(newFile => {
-      const oldFile = oldFiles.find(f => f.path === newFile.path);
-      if (oldFile && oldFile.content !== newFile.content) {
-        modified.push(newFile.path);
+    const deleted: string[] = [];
+
+    for (const [path] of newMap) {
+      if (!oldMap.has(path)) {
+        added.push(path);
+      } else if (oldMap.get(path) !== newMap.get(path)) {
+        modified.push(path);
       }
-    });
-    
+    }
+
+    for (const [path] of oldMap) {
+      if (!newMap.has(path)) {
+        deleted.push(path);
+      }
+    }
+
     return { added, modified, deleted };
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // SANITIZATION
+  // ─────────────────────────────────────────────────────────────
+
+  private static safeText(text: string): string {
+    return text.replace(/[`$<>]/g, "").slice(0, 500);
+  }
 }
-
-

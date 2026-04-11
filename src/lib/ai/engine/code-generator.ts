@@ -1,101 +1,133 @@
 //==================== FILE: src/lib/ai/engine/code-generator.ts ====================
 
-// src/lib/ai/engine/code-generator.ts
 import { AIFileNode, AIProjectPlan } from "../types/ai-project.types";
 
 export class CodeGenerator {
+
+  // ─────────────────────────────────────────────────────────────
+  // BASIC GENERATION (SAFE FALLBACK)
+  // ─────────────────────────────────────────────────────────────
+
   static generate(projectId: string, prompt: string): AIFileNode[] {
-    const timestamp = new Date().toISOString();
-    const projectName = prompt.slice(0, 40) || "AI Generated App";
-    
+    const safeName = this.safeText(prompt?.slice(0, 40)) || "AI App";
+
     return [
       {
         path: "src/App.jsx",
-        content: `...`, // Same content as before
-        type: "file"
+        content: this.generateSafeApp(safeName),
+        type: "file",
       },
       {
         path: "src/App.css",
-        content: `...`, // Same content as before
-        type: "file"
+        content: this.generateBaseCSS(),
+        type: "file",
       },
       {
         path: "src/main.jsx",
-        content: `...`, // Same content as before
-        type: "file"
-      }
+        content: this.generateEntryPoint(),
+        type: "file",
+      },
     ];
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // PLAN-BASED GENERATION (STRICT)
+  // ─────────────────────────────────────────────────────────────
+
   static generateFromPlan(projectId: string, plan: AIProjectPlan): AIFileNode[] {
-    // Generate project based on detailed plan
+    if (!plan || !plan.projectName) {
+      throw new Error("❌ Invalid plan: missing projectName");
+    }
+
     const files: AIFileNode[] = [];
-    
-    // Generate main App component
+
+    const safePlan = this.sanitizePlan(plan);
+
+    // App
     files.push({
       path: "src/App.jsx",
-      content: this.generateAppComponent(plan),
-      type: "file"
+      content: this.generateAppComponent(safePlan),
+      type: "file",
     });
-    
-    // Generate CSS
+
+    // CSS
     files.push({
       path: "src/App.css",
-      content: this.generateStyles(plan),
-      type: "file"
+      content: this.generateStyles(),
+      type: "file",
     });
-    
-    // Generate main entry
+
+    // Entry
     files.push({
       path: "src/main.jsx",
       content: this.generateEntryPoint(),
-      type: "file"
+      type: "file",
     });
-    
-    // Generate additional components
-    plan.components.forEach(component => {
+
+    // Components (validated)
+    safePlan.components.forEach((component) => {
+      const safeName = this.safeComponentName(component);
+
       files.push({
-        path: `src/components/${component}.jsx`,
-        content: this.generateComponent(component),
-        type: "file"
+        path: `src/components/${safeName}.jsx`,
+        content: this.generateComponent(safeName),
+        type: "file",
       });
     });
-    
+
     return files;
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // GENERATORS
+  // ─────────────────────────────────────────────────────────────
+
   private static generateAppComponent(plan: AIProjectPlan): string {
-    return `
-import React from 'react';
+    const features = (plan.features || [])
+      .map((f) => `<div className="feature">${this.safeText(f)}</div>`)
+      .join("\n        ");
+
+    return `import React from 'react';
 import './App.css';
 
 function App() {
   return (
     <div className="app">
-      <h1>${plan.projectName}</h1>
-      <p>${plan.description}</p>
+      <h1>${this.safeText(plan.projectName)}</h1>
+      <p>${this.safeText(plan.description)}</p>
       <div className="features">
-        ${plan.features.map(f => `<div className="feature">${f}</div>`).join('\n        ')}
+        ${features}
       </div>
     </div>
   );
 }
 
-export default App;
-    `;
+export default App;`;
   }
 
-  private static generateStyles(plan: AIProjectPlan): string {
-    return `
-* {
+  private static generateSafeApp(name: string): string {
+    return `import React from 'react';
+
+export default function App() {
+  return (
+    <div style={{ padding: "40px", textAlign: "center" }}>
+      <h1>${name}</h1>
+      <p>Pipeline working</p>
+    </div>
+  );
+}`;
+  }
+
+  private static generateStyles(): string {
+    return `* {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  font-family: system-ui, sans-serif;
+  background: linear-gradient(135deg, #6366f1, #a855f7);
   min-height: 100vh;
 }
 
@@ -107,45 +139,37 @@ body {
   color: white;
 }
 
-h1 {
-  font-size: 3rem;
-  margin-bottom: 20px;
-}
-
 .features {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 20px;
   margin-top: 40px;
 }
 
 .feature {
-  background: rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
+  background: rgba(255,255,255,0.1);
   padding: 20px;
   border-radius: 10px;
-}
-    `;
+}`;
+  }
+
+  private static generateBaseCSS(): string {
+    return `body { margin:0; font-family: system-ui; }`;
   }
 
   private static generateEntryPoint(): string {
-    return `
-import React from 'react';
+    return `import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
-import './App.css';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
-);
-    `;
+);`;
   }
 
   private static generateComponent(name: string): string {
-    return `
-import React from 'react';
+    return `import React from 'react';
 
 export default function ${name}() {
   return (
@@ -153,9 +177,30 @@ export default function ${name}() {
       <h2>${name} Component</h2>
     </div>
   );
-}
-    `;
+}`;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // SANITIZATION (CRITICAL)
+  // ─────────────────────────────────────────────────────────────
+
+  private static sanitizePlan(plan: AIProjectPlan): AIProjectPlan {
+    return {
+      ...plan,
+      projectName: this.safeText(plan.projectName),
+      description: this.safeText(plan.description),
+      components: (plan.components || []).map(this.safeComponentName),
+      features: (plan.features || []).map(this.safeText),
+    };
+  }
+
+  private static safeComponentName(name: string): string {
+    const cleaned = name.replace(/[^a-zA-Z0-9]/g, "");
+    return cleaned.charAt(0).toUpperCase() + cleaned.slice(1) || "Component";
+  }
+
+  private static safeText(text?: string): string {
+    if (!text) return "";
+    return text.replace(/[`$<>]/g, "");
   }
 }
-
-

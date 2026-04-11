@@ -10,6 +10,10 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@babel/generator": "^7.29.1",
+    "@babel/parser": "^7.29.2",
+    "@babel/traverse": "^7.29.0",
+    "@babel/types": "^7.29.0",
     "@clerk/nextjs": "^5.7.5",
     "@clerk/themes": "^2.0.0",
     "@formkit/auto-animate": "^0.8.1",
@@ -75,6 +79,8 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@types/babel__generator": "^7.27.0",
+    "@types/babel__traverse": "^7.28.0",
     "@types/node": "^20.19.37",
     "@types/react": "18.2.48",
     "@types/react-dom": "18.2.18",

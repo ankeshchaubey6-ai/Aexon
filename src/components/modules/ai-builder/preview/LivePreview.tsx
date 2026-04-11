@@ -35,11 +35,24 @@
 //   normally so the iframe just navigates rather than remounting.
 
 import { useEffect, useRef, useState, memo } from "react";
-import { Loader2, Monitor, AlertCircle, RefreshCw } from "lucide-react";
 import { useAIBuilderStore } from "../state/ai-builder.store";
 import { useWebContainer } from "../state/use-webcontainer";
 
 type AIFile = { path: string; content: string };
+
+// ─── Safe Icons (replaces lucide-react) ───────────────────────────────────────
+const Icon = ({ children }: { children: React.ReactNode }) => (
+  <span style={{ display: "inline-flex", width: 14, height: 14 }}>
+    {children}
+  </span>
+);
+
+const Icons = {
+  monitor: () => <Icon>🖥</Icon>,
+  alert: () => <Icon>⚠</Icon>,
+  refresh: () => <Icon>↻</Icon>,
+  loading: () => <Icon>⏳</Icon>,
+};
 
 // ── Status badge ───────────────────────────────────────────────────────────────
 const StatusBadge = ({ status }: { status: string }) => {
@@ -49,12 +62,28 @@ const StatusBadge = ({ status }: { status: string }) => {
     !isRunning && !isError && status !== "idle" && status !== "waiting-files";
 
   return (
-    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+    <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#94a3b8" }}>
       {isRunning && (
-        <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+        <span
+          style={{
+            height: 6,
+            width: 6,
+            borderRadius: "50%",
+            backgroundColor: "#22c55e",
+            animation: "pulse 1.5s infinite",
+          }}
+        />
       )}
-      {isLoading && <Loader2 className="h-3 w-3 animate-spin text-yellow-500" />}
-      {isError   && <AlertCircle className="h-3 w-3 text-red-500" />}
+      {isLoading && (
+        <span style={{ display: "inline-flex", animation: "spin 1s linear infinite", color: "#eab308" }}>
+          <Icons.loading />
+        </span>
+      )}
+      {isError && (
+        <span style={{ display: "inline-flex", color: "#ef4444" }}>
+          <Icons.alert />
+        </span>
+      )}
       {status}
     </span>
   );
@@ -172,40 +201,83 @@ const LivePreview = memo(({ projectId }: { projectId: string | null }) => {
   };
 
   return (
-    <div className="h-full flex flex-col bg-background">
+    <div style={{
+      height: "100%",
+      display: "flex",
+      flexDirection: "column",
+      background: "#0f172a",
+      color: "#e2e8f0"
+    }}>
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
-        <div className="flex items-center gap-2">
-          <Monitor className="h-3.5 w-3.5 text-muted-foreground" />
-          <span className="text-xs font-medium">Preview</span>
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "8px 12px",
+        borderBottom: "1px solid #1e293b",
+        flexShrink: 0,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ display: "inline-flex", color: "#94a3b8" }}>
+            <Icons.monitor />
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 500 }}>Preview</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <StatusBadge status={status} />
           <button
             onClick={handleRefresh}
             disabled={!files.length}
             title="Force remount"
-            className="p-1 rounded hover:bg-muted transition-colors disabled:opacity-40"
+            style={{
+              padding: 4,
+              borderRadius: 4,
+              background: "transparent",
+              border: "none",
+              cursor: files.length ? "pointer" : "default",
+              opacity: files.length ? 1 : 0.4,
+              color: "#94a3b8",
+              display: "inline-flex",
+            }}
           >
-            <RefreshCw className="h-3 w-3 text-muted-foreground" />
+            <Icons.refresh />
           </button>
         </div>
       </div>
 
       {/* Content */}
-      <div className="flex-1 relative overflow-hidden">
+      <div style={{
+        flex: 1,
+        position: "relative",
+        overflow: "hidden",
+        height: "100%"
+      }}>
         {url ? (
           // FIX LP3: key only changes on explicit refresh, not on every URL change.
           // src changes navigate the iframe without tearing it down.
-          <iframe
-            key={iframeReloadKey}
-            src={url}
-            allow="cross-origin-isolated"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
-            className="absolute inset-0 w-full h-full border-0"
-            style={{ background: "#ffffff" }}
-            title="Live preview"
-          />
+          <div style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            overflow: "hidden",
+            background: "#0f172a"
+          }}>
+            <iframe
+              key={iframeReloadKey}
+              src={url}
+              allow="cross-origin-isolated"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+              style={{
+                width: "100%",
+                height: "100%",
+                border: 0,
+                display: "block",
+                background: "#0f172a"
+              }}
+              title="Live preview"
+            />
+          </div>
         ) : (
           <PreviewPlaceholder status={status} />
         )}
@@ -237,17 +309,39 @@ function PreviewPlaceholder({ status }: { status: string }) {
   const isError = status === "error" || status === "install-failed";
 
   return (
-    <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-center px-6">
+    <div style={{
+      width: "100%",
+      height: "100%",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 12,
+      textAlign: "center",
+      padding: "0 24px",
+    }}>
       {isError ? (
-        <AlertCircle className="h-8 w-8 text-red-400" />
+        <span style={{ display: "inline-flex", color: "#f87171", fontSize: 32 }}>
+          <Icons.alert />
+        </span>
       ) : status === "idle" ? (
-        <Monitor className="h-8 w-8 text-muted-foreground/40" />
+        <span style={{ display: "inline-flex", color: "#64748b", opacity: 0.4, fontSize: 32 }}>
+          <Icons.monitor />
+        </span>
       ) : (
-        <Loader2 className="h-8 w-8 animate-spin text-primary/60" />
+        <span style={{
+          display: "inline-flex",
+          animation: "spin 1s linear infinite",
+          color: "#818cf8",
+          opacity: 0.6,
+          fontSize: 32,
+        }}>
+          <Icons.loading />
+        </span>
       )}
-      <p className="text-sm text-muted-foreground max-w-xs">{message}</p>
+      <p style={{ fontSize: 14, color: "#94a3b8", maxWidth: "20rem" }}>{message}</p>
       {status === "installing" && (
-        <p className="text-xs text-muted-foreground/60">
+        <p style={{ fontSize: 12, color: "#64748b", opacity: 0.6 }}>
           Dependencies are cached after the first run
         </p>
       )}

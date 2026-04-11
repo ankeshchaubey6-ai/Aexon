@@ -4,12 +4,6 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
-import {
-  PanelLeftClose, PanelLeftOpen, Monitor, Tablet, Smartphone,
-  Code2, ExternalLink, Copy, Check, Undo2, Redo2,
-  FolderOpen, MessageSquare, Rocket, Download, Github,
-  Loader2, ChevronDown,
-} from "lucide-react";
 
 import ChatPanel from "../chat/ChatPanel";
 import ProjectSidebar from "../chat/ProjectSidebar";
@@ -20,6 +14,34 @@ import { useAIBuilderStore } from "../state/ai-builder.store";
 import { useWebContainer, resetContainer } from "../state/use-webcontainer";
 import { cn } from "@/lib/utils";
 
+// ─── Safe Icon Components (replaces lucide-react) ─────────────────────────────
+const Icon = ({ children }: { children: React.ReactNode }) => (
+  <span style={{ display: "inline-flex", width: 14, height: 14 }}>
+    {children}
+  </span>
+);
+
+const Icons = {
+  close: () => <Icon>×</Icon>,
+  open: () => <Icon>≡</Icon>,
+  monitor: () => <Icon>🖥</Icon>,
+  tablet: () => <Icon>📱</Icon>,
+  mobile: () => <Icon>📲</Icon>,
+  code: () => <Icon>{"</>"}</Icon>,
+  external: () => <Icon>↗</Icon>,
+  copy: () => <Icon>📋</Icon>,
+  check: () => <Icon>✔</Icon>,
+  undo: () => <Icon>↶</Icon>,
+  redo: () => <Icon>↷</Icon>,
+  folder: () => <Icon>📁</Icon>,
+  chat: () => <Icon>💬</Icon>,
+  rocket: () => <Icon>🚀</Icon>,
+  download: () => <Icon>⬇</Icon>,
+  github: () => <Icon>🐙</Icon>,
+  loading: () => <Icon>⏳</Icon>,
+  chevron: () => <Icon>⌄</Icon>,
+};
+
 type SidebarTab = "history" | "files";
 type PreviewTab = "preview" | "code";
 type Device = "desktop" | "tablet" | "mobile";
@@ -29,6 +51,19 @@ const DEVICE_WIDTHS: Record<Device, string> = {
   desktop: "100%",
   tablet: "768px",
   mobile: "390px",
+};
+
+// ─── Safe Preview Wrapper ──────────────────────────────────────────────────────
+const SafePreview = ({ projectId }: { projectId: string | null }) => {
+  try {
+    return <LivePreview projectId={projectId} />;
+  } catch {
+    return (
+      <div style={{ padding: "2rem", textAlign: "center", color: "#888" }}>
+        Preview unavailable
+      </div>
+    );
+  }
 };
 
 // ─── Deploy Drawer ─────────────────────────────────────────────────────────────
@@ -82,7 +117,7 @@ function DeployDrawer({
         <div className="h-[2px] w-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500" />
         <div className="px-5 py-4 border-b border-white/8">
           <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-            <Rocket className="w-4 h-4 text-violet-400" /> Deploy Project
+            <Icons.rocket /> Deploy Project
           </h2>
           <p className="text-xs text-white/40 mt-0.5">Choose a platform and go live</p>
         </div>
@@ -110,11 +145,11 @@ function DeployDrawer({
           <div className="mx-5 mb-4 flex items-center gap-2 px-3 py-2.5 bg-green-500/10 border border-green-500/20 rounded-xl">
             <span className="text-xs text-green-400 truncate flex-1">{deployedUrl}</span>
             <button onClick={copyUrl} className="text-green-400 hover:text-green-300 shrink-0">
-              {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              {copied ? <Icons.check /> : <Icons.copy />}
             </button>
             <a href={deployedUrl} target="_blank" rel="noopener noreferrer"
               className="text-green-400 hover:text-green-300 shrink-0">
-              <ExternalLink className="w-3.5 h-3.5" />
+              <Icons.external />
             </a>
           </div>
         )}
@@ -133,9 +168,9 @@ function DeployDrawer({
             disabled={status === "deploying"}
             className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-xs font-medium text-white flex items-center justify-center gap-1.5 disabled:opacity-50">
             {status === "deploying"
-              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Deploying…</>
+              ? <><Icons.loading /> Deploying…</>
               : status === "done" ? "Done"
-              : <><Rocket className="w-3.5 h-3.5" /> Deploy to {targets.find((t) => t.id === target)?.label}</>}
+              : <><Icons.rocket /> Deploy to {targets.find((t) => t.id === target)?.label}</>}
           </button>
         </div>
       </div>
@@ -208,11 +243,11 @@ function WorkspaceToolbar({
     <div className="h-11 shrink-0 flex items-center gap-2 px-3 border-b border-border bg-background">
       <button onClick={onUndo} disabled={!canUndo} title="Undo"
         className="p-1.5 rounded-lg hover:bg-muted transition-colors disabled:opacity-30">
-        <Undo2 className="w-3.5 h-3.5" />
+        <Icons.undo />
       </button>
       <button onClick={onRedo} disabled={!canRedo} title="Redo"
         className="p-1.5 rounded-lg hover:bg-muted transition-colors disabled:opacity-30">
-        <Redo2 className="w-3.5 h-3.5" />
+        <Icons.redo />
       </button>
       <div className="w-px h-5 bg-border" />
       {(previewUrl || projectId) && (
@@ -228,7 +263,7 @@ function WorkspaceToolbar({
             onClick={copyPreviewUrl}
             disabled={!previewUrl && !projectId}
             className="shrink-0 hover:text-foreground ml-0.5 disabled:opacity-30">
-            {copiedUrl ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+            {copiedUrl ? <Icons.check /> : <Icons.copy />}
           </button>
         </div>
       )}
@@ -237,7 +272,7 @@ function WorkspaceToolbar({
         disabled={!projectId}
         title={previewUrl ? "Open live app in new tab" : "Start preview first"}
         className="p-1.5 rounded-lg hover:bg-muted transition-colors disabled:opacity-30 text-muted-foreground hover:text-foreground">
-        <ExternalLink className="w-3.5 h-3.5" />
+        <Icons.external />
       </button>
       <div className="flex-1" />
       <div className="relative">
@@ -246,20 +281,20 @@ function WorkspaceToolbar({
           disabled={!projectId || exportingZip || pushingGithub}
           className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-all disabled:opacity-40">
           {exportingZip || pushingGithub
-            ? <Loader2 className="w-3 h-3 animate-spin" />
-            : <Download className="w-3 h-3" />}
-          Export <ChevronDown className="w-3 h-3" />
+            ? <Icons.loading />
+            : <Icons.download />}
+          Export <Icons.chevron />
         </button>
         {showExportMenu && (
           <div className="absolute right-0 top-full mt-1 w-44 bg-popover border border-border rounded-xl shadow-xl overflow-hidden z-50">
             <button onClick={handleExportZip}
               className="w-full flex items-center gap-2 px-3 py-2.5 text-xs hover:bg-muted transition-colors">
-              <Download className="w-3.5 h-3.5 text-muted-foreground" />
+              <Icons.download />
               Download ZIP
             </button>
             <button onClick={handlePushGithub}
               className="w-full flex items-center gap-2 px-3 py-2.5 text-xs hover:bg-muted transition-colors">
-              <Github className="w-3.5 h-3.5 text-muted-foreground" />
+              <Icons.github />
               Push to GitHub
             </button>
           </div>
@@ -269,7 +304,7 @@ function WorkspaceToolbar({
         onClick={onDeploy}
         disabled={!projectId}
         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-xs font-medium text-white transition-all disabled:opacity-40 shadow-sm">
-        <Rocket className="w-3 h-3" /> Deploy
+        <Icons.rocket /> Deploy
       </button>
     </div>
   );
@@ -383,7 +418,7 @@ const AIWorkspace = () => {
                   ? "text-foreground border-b-2 border-primary"
                   : "text-muted-foreground hover:text-foreground"
               )}>
-              <MessageSquare className="w-3 h-3" /> History
+              <Icons.chat /> History
             </button>
             <button
               onClick={() => setSidebarTab("files")}
@@ -393,7 +428,7 @@ const AIWorkspace = () => {
                   ? "text-foreground border-b-2 border-primary"
                   : "text-muted-foreground hover:text-foreground"
               )}>
-              <FolderOpen className="w-3 h-3" /> Files
+              <Icons.folder /> Files
             </button>
           </div>
           <div className="flex-1 overflow-hidden">
@@ -408,7 +443,7 @@ const AIWorkspace = () => {
           onClick={() => setSidebarOpen((v) => !v)}
           title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
           className="shrink-0 self-center -ml-px z-10 w-5 h-10 flex items-center justify-center border border-border rounded-r-lg bg-background hover:bg-muted transition-colors text-muted-foreground hover:text-foreground">
-          {sidebarOpen ? <PanelLeftClose className="w-3 h-3" /> : <PanelLeftOpen className="w-3 h-3" />}
+          {sidebarOpen ? <Icons.close /> : <Icons.open />}
         </button>
 
         {/* Chat */}
@@ -428,7 +463,7 @@ const AIWorkspace = () => {
                     ? "bg-muted text-foreground"
                     : "text-muted-foreground hover:text-foreground"
                 )}>
-                <Monitor className="w-3 h-3" /> Preview
+                <Icons.monitor /> Preview
               </button>
               <button
                 onClick={() => setPreviewTab("code")}
@@ -438,13 +473,13 @@ const AIWorkspace = () => {
                     ? "bg-muted text-foreground"
                     : "text-muted-foreground hover:text-foreground"
                 )}>
-                <Code2 className="w-3 h-3" /> Code
+                <Icons.code /> Code
               </button>
             </div>
             {previewTab === "preview" && (
               <div className="flex items-center rounded-lg border border-border overflow-hidden ml-1">
                 {(["desktop", "tablet", "mobile"] as Device[]).map((d) => {
-                  const Icon = d === "desktop" ? Monitor : d === "tablet" ? Tablet : Smartphone;
+                  const IconComponent = d === "desktop" ? Icons.monitor : d === "tablet" ? Icons.tablet : Icons.mobile;
                   return (
                     <button
                       key={d}
@@ -456,7 +491,7 @@ const AIWorkspace = () => {
                           ? "bg-muted text-foreground"
                           : "text-muted-foreground hover:text-foreground"
                       )}>
-                      <Icon className="w-3 h-3" />
+                      <IconComponent />
                     </button>
                   );
                 })}
@@ -468,7 +503,7 @@ const AIWorkspace = () => {
               <div
                 className="h-full transition-all duration-300 overflow-hidden"
                 style={{ width: DEVICE_WIDTHS[device] }}>
-                <LivePreview projectId={storeProjectId} />
+                <SafePreview projectId={storeProjectId} />
               </div>
             ) : (
               <div className="w-full h-full">

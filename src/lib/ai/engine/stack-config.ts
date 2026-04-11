@@ -1,5 +1,3 @@
-//==================== FILE: src/lib/ai/engine/stack-config.ts ====================
-
 // src/lib/ai/engine/stack-config.ts
 //
 // The pipeline uses Vite + React (not Next.js).
@@ -11,7 +9,7 @@ export const DEFAULT_STACK = {
   framework: "vite",
   ui: "react",
   language: "jsx",        // plain JSX — no TypeScript
-  styling: "css",         // plain CSS — no Tailwind
+  styling: "inline",      // inline styles only — no CSS files
   bundler: "vite@5",
   reactVersion: "18.2.0",
 } as const;
@@ -64,8 +62,7 @@ export function makeIndexHtml(projectName: string): string {
 export function makeMainJsx(): string {
   return `import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
-import './App.css';
+import App from './App.jsx';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -83,22 +80,6 @@ export default defineConfig({
 });`;
 }
 
-export function makeAppCss(): string {
-  return `* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-.app {
-  min-height: 100vh;
-}`;
-}
-
 // ─────────────────────────────────────────────
 // REQUIRED FILES — enforced by Stage 5 assembler
 // ─────────────────────────────────────────────
@@ -113,7 +94,6 @@ export const REQUIRED_FILES: RequiredFile[] = [
   { path: "index.html",     generator: makeIndexHtml },
   { path: "src/main.jsx",   generator: () => makeMainJsx() },
   { path: "vite.config.js", generator: () => makeViteConfig() },
-  { path: "src/App.css",    generator: () => makeAppCss() },
 ];
 
 // ─────────────────────────────────────────────
@@ -127,9 +107,9 @@ RULES (enforced):
 - No react-router-dom; no external libraries besides react and react-dom
 - Export default at the bottom of every .jsx file
 - All imports use relative paths (e.g. ./components/Header — NOT @/)
-- No TypeScript; plain .jsx and .css files only
+- No TypeScript; plain .jsx files only
 - Write complete, production-quality code — no placeholders, no TODOs
-- CSS files: include media queries, hover effects, smooth transitions
+- Use inline styles (style={{}}) for all styling — DO NOT import or use any .css files
 - Components: use realistic copy, unicode/emoji icons, real content
 `.trim();
 
@@ -144,5 +124,3 @@ Fix ONLY syntax errors:
 Do NOT change logic, component names, styling, or functionality.
 Preserve every line that is already valid.
 `.trim();
-
-
