@@ -3,7 +3,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { streamProjectPipeline } from "@/lib/ai/stream/stream-pipeline";
-import type { StreamFile } from "@/lib/ai/types/stream.types";
+import type { StreamFile } from "@/lib/ai/stream/stream-pipeline";
 
 const GENERATION_TIMEOUT_MS = 30 * 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 8_000;
@@ -96,6 +96,11 @@ export async function POST(req: NextRequest) {
               onFile: async (file: StreamFile) => {
                 if (isClosed) return;
 
+                // Prevent empty/corrupt writes
+                if (!file.content || file.content.length < 10) {
+                  return;
+                }
+
                 if (!(file as any).provisional) {
                   await db.aIProjectFile.upsert({
                     where: {
@@ -117,6 +122,10 @@ export async function POST(req: NextRequest) {
                   type: "file",
                   file: { path: file.path, content: file.content },
                 });
+              },
+
+              onLog: (message: string) => {
+                send({ type: "log", message });
               },
 
               onPing: ping,

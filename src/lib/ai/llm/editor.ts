@@ -1,155 +1,118 @@
 // src/lib/ai/llm/editor.ts
+// v18.0 — Clean editor: modify only necessary files, preserve existing libraries and styling.
+
 import OpenAI from "openai";
-import { AIFileNode } from "../types/ai-project.types";
+import type { StreamFile } from "@/lib/ai/stream/stream-pipeline";
 
 const client = new OpenAI({
   apiKey: process.env.NVIDIA_API_KEY!,
   baseURL: "https://integrate.api.nvidia.com/v1",
 });
 
-function isUnsafeContent(content: string): boolean {
-  return (
-    /\.css/.test(content) ||
-    /framer-motion/.test(content) ||
-    /lucide-react/.test(content) ||
-    /react-router/.test(content) ||
-    /className=/.test(content)
-  );
+const MODEL = "meta/llama-3.1-70b-instruct";
+const PING_INTERVAL_MS = 8_000;
+
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/^```(?:json)?\s*/m, "")
+    .replace(/\s*```\s*$/m, "")
+    .trim();
 }
 
-function makeSafeFile(path: string): AIFileNode {
-  const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "Component";
-  return {
-    path,
-    type: "file",
-    content: `import React from 'react';
-export default function ${name}() {
-  return <div style={{ padding: 10 }}>${name}</div>;
-}`
-  };
-}
-
-export async function generateEditWithKimi(
+export async function generateEdit(
   prompt: string,
-  files: AIFileNode[]
-): Promise<AIFileNode[]> {
-  console.log("✏️ KIMI EDIT MODE");
+  files: StreamFile[],
+  onPing?: () => void
+): Promise<StreamFile[]> {
+  const pingTimer = onPing ? setInterval(onPing, PING_INTERVAL_MS) : null;
 
   try {
+    const fileBundle = files
+      .map((f) => `// ═══ ${f.path} ═══\n${f.content}`)
+      .join("\n\n");
+
+    const systemPrompt = `You are a senior React engineer editing an existing project.
+
+Return ONLY a valid JSON array of modified files. No markdown, no explanation.
+
+Format: [{"path": "src/...", "content": "..."}]
+
+RULES:
+- Modify ONLY the files that need changes.
+- Keep the existing project structure and styling.
+- Tailwind CSS is allowed (className with Tailwind utilities).
+- framer-motion is allowed (import { motion, AnimatePresence } from "framer-motion").
+- lucide-react is allowed (import icons from "lucide-react").
+- Preserve all existing functionality and imports.
+- DO NOT remove working code unless requested.
+- DO NOT introduce new libraries unless necessary.
+- Every .jsx file must have import React from 'react' and export default.`;
+
+    const userPrompt = `User request: ${prompt}
+
+Current project files:
+${fileBundle}
+
+Return the updated versions of ONLY the files that changed.`;
+
     const completion = await client.chat.completions.create({
-      model: "moonshotai/kimi-k2-instruct",
-
-      messages: [
-        {
-          role: "system",
-          content: `
-You are a senior React engineer editing an existing project.
-
-Return ONLY valid JSON array. No markdown. No explanation.
-
-FORMAT:
-[
-  { "path": "file_path", "content": "updated_code" }
-]
-
----
-
-STRICT RULES (MANDATORY):
-
-* ONLY React (no Next.js)
-* ONLY inline styles (style={{}})
-* NO CSS files
-* NO Tailwind
-* NO className styling
-* NO external UI libraries
-* NO framer-motion
-* NO lucide-react
-* NO react-router
-* DO NOT introduce new dependencies
-* DO NOT remove existing files
-* Modify ONLY what is required
-* Components must:
-  * export default
-  * return valid JSX
-* If unsafe code is required → DO NOT implement it
-`,
-        },
-        {
-          role: "user",
-          content: `
-User Request:
-${prompt}
-
-Current Project Files:
-${JSON.stringify(files, null, 2)}
-
-Please update the project according to the user's request.
-Return the COMPLETE updated files array.
-`,
-        },
-      ],
-
+      model: MODEL,
       temperature: 0.2,
-      max_tokens: 8000,
+      max_tokens: 2000, // NVIDIA-safe limit
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
     });
 
-    let text = completion.choices[0]?.message?.content || "";
+    if (pingTimer) clearInterval(pingTimer);
 
-    // Clean response
-    text = text.replace(/```json/g, "").replace(/```/g, "").trim();
+    const raw = completion.choices[0]?.message?.content ?? "";
+    const cleaned = stripMarkdown(raw);
 
-    // Extract array
-    const start = text.indexOf("[");
-    const end = text.lastIndexOf("]");
+    const start = cleaned.indexOf("[");
+    const end = cleaned.lastIndexOf("]");
 
-    if (start !== -1 && end !== -1) {
-      text = text.slice(start, end + 1);
-    }
-
-    try {
-      const parsed = JSON.parse(text);
-      
-      if (!Array.isArray(parsed)) {
-        console.error("❌ Edit parse failed: not an array");
-        return files;
-      }
-      
-      // Validate and sanitize each file
-      const validFiles = parsed
-        .map((file: any) => {
-          if (!file.path || typeof file.content !== "string") return null;
-          
-          if (isUnsafeContent(file.content)) {
-            console.warn(`⚠️ Unsafe content detected in ${file.path}, replacing with safe fallback`);
-            return makeSafeFile(file.path);
-          }
-          
-          return file;
-        })
-        .filter(Boolean);
-      
-      if (validFiles.length === 0) {
-        console.error("❌ No valid files in AI response");
-        return files;
-      }
-      
-      // Ensure no files are lost (merge with original)
-      const merged = files.map(original => {
-        const updated = validFiles.find(f => f.path === original.path);
-        return updated || original;
-      });
-      
-      console.log(`✅ Successfully edited ${merged.length} files`);
-      return merged;
-      
-    } catch (parseError) {
-      console.error("❌ Edit parse failed:", parseError);
-      console.error("Raw text:", text);
+    if (start === -1 || end === -1) {
+      console.warn("[editor] No JSON array found in response");
       return files;
     }
 
-  } catch (err) {
-    console.error("❌ Kimi edit error:", err);
+    const parsed = JSON.parse(cleaned.slice(start, end + 1));
+
+    if (!Array.isArray(parsed)) {
+      console.warn("[editor] Parsed response is not an array");
+      return files;
+    }
+
+    const updatedMap = new Map<string, string>();
+
+    for (const item of parsed) {
+      if (
+        typeof item === "object" &&
+        item !== null &&
+        typeof item.path === "string" &&
+        typeof item.content === "string" &&
+        item.content.trim().length > 20
+      ) {
+        updatedMap.set(item.path, item.content);
+      }
+    }
+
+    if (updatedMap.size === 0) {
+      console.warn("[editor] No valid file updates in response");
+      return files;
+    }
+
+    const result = files.map((f) => {
+      const newContent = updatedMap.get(f.path);
+      return newContent ? { ...f, content: newContent } : f;
+    });
+
+    return result;
+  } catch (error) {
+    if (pingTimer) clearInterval(pingTimer);
+    console.error("❌ [editor] LLM call failed:", error);
     return files;
   }
 }
