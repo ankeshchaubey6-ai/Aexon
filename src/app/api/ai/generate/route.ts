@@ -23,27 +23,6 @@ import { AIFileNode } from "@/lib/ai/types/ai-project.types";
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
-// ─── Safety helpers ───────────────────────────────────────────────────────────
-function isUnsafeFile(content: string): boolean {
-  return (
-    content.includes(".css") ||
-    content.includes("framer-motion") ||
-    content.includes("lucide-react")
-  );
-}
-
-function makeSafeFile(path: string): AIFileNode {
-  const name = path.split("/").pop()?.replace(/\.[^.]+$/, "") || "Component";
-  return {
-    path,
-    type: "file",
-    content: `import React from 'react';
-export default function ${name}() {
-  return <div>${name}</div>;
-}`,
-  };
-}
-
 export async function POST(req: NextRequest) {
   // ───────────── AUTH ─────────────
   const clerkUser = await currentUser();
@@ -140,11 +119,8 @@ export async function POST(req: NextRequest) {
         // ── Run pipeline with all required callbacks ──
         await streamProjectPipeline(prompt, {
           onFile: async (file) => {
-            // ── Safety: replace unsafe files before emitting ──
-            let safeFile = file;
-            if (isUnsafeFile(file.content)) {
-              safeFile = { ...file, ...makeSafeFile(file.path) };
-            }
+            // Trust the pipeline — no extra sanitization
+            const safeFile = file;
 
             const existing = allFiles.findIndex((f) => f.path === safeFile.path);
             const node: AIFileNode = {
@@ -183,10 +159,8 @@ export async function POST(req: NextRequest) {
           },
         });
 
-        // ── Final safety before DB save: replace any unsafe files ──
-        const safeFiles = allFiles.map((f) =>
-          isUnsafeFile(f.content) ? makeSafeFile(f.path) : f
-        );
+        // No extra sanitization — trust the pipeline
+        const safeFiles = allFiles;
 
         // ── Save ALL files to DB once generation is complete ──
         if (safeFiles.length > 0) {

@@ -21,6 +21,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { planProject } from "@/lib/ai/llm/plan-project";
+import { buildDesignSystem, DesignSystem } from "@/lib/ai/engine/design-system";
 
 export interface BasicPlan {
   name: string;
@@ -60,7 +61,7 @@ export interface FileContent {
 //    Rule group C — Imports (fixes: missing imports, wrong packages, extensions)
 //    Rule group D — Hooks (fixes: missing deps arrays, wrong useMemo syntax)
 //    Rule group E — File structure (fixes: missing files, missing export default)
-//    Rule group F — STYLING: INLINE ONLY — NO CSS, NO TAILWIND
+//    Rule group F — STYLING: TailwindCSS-based allowed (no CSS imports)
 //    Rule group G — Proxy corruption (fixes: "= />", <REDACTED_EMAIL>)
 //    Rule group H — TypeScript leaks (fixes: React.FC in .jsx, useState<T>)
 //    Rule group I — Identifiers (fixes: numeric filenames, duplicate consts)
@@ -105,7 +106,7 @@ C1. AVAILABLE packages (npm-installed, safe to import):
 C2. BANNED packages (not installed — will cause ReferenceError at runtime):
     react-router-dom, axios, three, @react-three/fiber, @react-three/drei,
     gsap, react-intersection-observer, @tanstack/react-query, zustand, recharts,
-    preact, styled-components, @emotion/*, next/*, classnames, framer-motion, lucide-react, clsx, tailwindcss
+    preact, styled-components, @emotion/*, next/*, classnames, clsx
 C3. Every identifier you USE must be IMPORTED. No implicit globals.
     WRONG:  const cb = useCallback(() => {}, [])   // useCallback not imported
     RIGHT:  import React, { useCallback } from 'react';
@@ -172,14 +173,11 @@ E7. If a component uses sub-components (Logo, NavLinks, UserMenu), EITHER:
     b) Import them from a file listed in ALREADY GENERATED.
     NEVER import from a file that does not exist.
 
-━━━ GROUP F — STYLING (INLINE ONLY) ━━━
-F1. ALL styling must use inline styles: style={{}}
-F2. NEVER use className for styling
-F3. NEVER import or reference ANY .css file
-F4. NEVER use Tailwind classes (bg-*, text-*, flex, grid, etc.)
-F5. NEVER use url() or external stylesheets
-F6. For hover effects, use onMouseEnter/onMouseLeave + useState
-F7. For responsive layouts, use window.matchMedia or useEffect with resize listeners
+━━━ GROUP F — STYLING (TAILWIND + MODERN UI) ━━━
+F1. Use TailwindCSS via className for styling
+F2. Inline styles allowed only for dynamic values only
+F3. NEVER import CSS files
+F4. NEVER use external stylesheets
 
 ━━━ GROUP G — PROXY CORRUPTION ━━━
 G1. Arrow functions use "=>" — never "= />" or "= / >".
@@ -203,8 +201,6 @@ I3. Common typos that break builds — never write these:
     handlleScroll, scrolllTo, userState, useEffekt, useCallbakc, classname, onclick
 I4. Do not declare variables you never use.
 I5. useCallback and useMemo return values should be assigned to const.
-I6. NEVER use className unless it's for semantic purposes only.
-    Styling must ALWAYS be inline.
 
 ━━━ GROUP J — STATE & SIDE EFFECTS ━━━
 J1. Never mutate state directly:
@@ -224,7 +220,7 @@ J3. Never call a hook after an early return:
 // 3. COMPONENT_TEMPLATES
 //    Reference skeletons injected into the LLM prompt when generating a
 //    component of the matching category. Dramatically reduces hallucination.
-//    All templates use inline styles ONLY — no className, no Tailwind, no CSS.
+//    Templates updated to use TailwindCSS classes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const COMPONENT_TEMPLATES: Record<string, string> = {
@@ -249,25 +245,20 @@ function ComponentName({ title = 'Default', items = [] }) {
   }, [items]); // dep array is SECOND arg to useMemo — NOT inside first arg
 
   return (
-    <section style={{ padding: '5rem 1.5rem' }}>
-      <h2 style={{ fontSize: '2.25rem', fontWeight: 'bold', color: '#fff', marginBottom: '2rem' }}>{title}</h2>
-      <div style={{ display: 'grid', gap: '1rem', marginTop: '2rem' }}>
+    <section className="py-20 px-6">
+      <h2 className="text-4xl font-bold text-white mb-8">{title}</h2>
+      <div className="grid gap-4 mt-8">
         {processed.map((item, i) => (
           <div
             key={item.id ?? i}
             onClick={() => handleClick(item.id)}
             onMouseEnter={() => setHovered(item.id)}
             onMouseLeave={() => setHovered(null)}
-            style={{
-              padding: '1rem',
-              borderRadius: '0.75rem',
-              backgroundColor: hovered === item.id ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.05)',
-              cursor: 'pointer',
-              transition: 'background-color 0.2s',
-              border: '1px solid rgba(255,255,255,0.1)'
-            }}
+            className={\`p-4 rounded-xl cursor-pointer transition-colors \${
+              hovered === item.id ? 'bg-white/10' : 'bg-white/5'
+            } border border-white/10\`}
           >
-            <span style={{ color: '#fff' }}>{item.name}</span>
+            <span className="text-white">{item.name}</span>
           </div>
         ))}
       </div>
@@ -283,9 +274,9 @@ export default ComponentName;
 // Sub-components defined IN THIS FILE — no missing import errors
 function Logo() {
   return (
-    <a href="/" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', textDecoration: 'none' }}>
-      <div style={{ width: '2rem', height: '2rem', borderRadius: '0.5rem', backgroundColor: '#6366f1' }} />
-      <span style={{ fontWeight: 'bold', color: '#fff', fontSize: '1.125rem' }}>Brand</span>
+    <a href="/" className="flex items-center gap-2 no-underline">
+      <div className="w-8 h-8 rounded-lg bg-indigo-500" />
+      <span className="font-bold text-white text-lg">Brand</span>
     </a>
   );
 }
@@ -293,20 +284,16 @@ function Logo() {
 function NavLinks({ links = [] }) {
   const [hoveredLink, setHoveredLink] = useState(null);
   return (
-    <nav style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
+    <nav className="flex items-center gap-6">
       {links.map((link) => (
         <a
           key={link.label}
           href={link.href}
           onMouseEnter={() => setHoveredLink(link.label)}
           onMouseLeave={() => setHoveredLink(null)}
-          style={{
-            color: hoveredLink === link.label ? '#fff' : '#9ca3af',
-            fontSize: '0.875rem',
-            fontWeight: '500',
-            textDecoration: 'none',
-            transition: 'color 0.15s'
-          }}
+          className={\`text-sm font-medium no-underline transition-colors \${
+            hoveredLink === link.label ? 'text-white' : 'text-gray-400'
+          }\`}
         >
           {link.label}
         </a>
@@ -317,38 +304,15 @@ function NavLinks({ links = [] }) {
 
 function UserMenu({ isLoggedIn = false }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+    <div className="flex items-center gap-3">
       {isLoggedIn ? (
-        <button type="button" style={{
-          padding: '0.5rem 1rem',
-          borderRadius: '0.5rem',
-          backgroundColor: 'rgba(255,255,255,0.1)',
-          color: '#fff',
-          fontSize: '0.875rem',
-          fontWeight: '500',
-          border: 'none',
-          cursor: 'pointer',
-          transition: 'background-color 0.15s'
-        }}>
+        <button type="button" className="px-4 py-2 rounded-lg bg-white/10 text-white text-sm font-medium border-0 cursor-pointer transition-colors hover:bg-white/20">
           Dashboard
         </button>
       ) : (
         <>
-          <button type="button" style={{ background: 'none', border: 'none', color: '#9ca3af', fontSize: '0.875rem', fontWeight: '500', cursor: 'pointer' }}>
-            Sign in
-          </button>
-          <button type="button" style={{
-            padding: '0.5rem 1rem',
-            borderRadius: '0.5rem',
-            backgroundColor: '#6366f1',
-            color: '#fff',
-            fontSize: '0.875rem',
-            fontWeight: '500',
-            border: 'none',
-            cursor: 'pointer'
-          }}>
-            Get started
-          </button>
+          <button type="button" className="bg-transparent border-0 text-gray-400 text-sm font-medium cursor-pointer">Sign in</button>
+          <button type="button" className="px-4 py-2 rounded-lg bg-indigo-500 text-white text-sm font-medium border-0 cursor-pointer">Get started</button>
         </>
       )}
     </div>
@@ -387,19 +351,20 @@ function Header() {
 
   return (
     <header style={headerStyle}>
-      <div style={{ maxWidth: '80rem', margin: '0 auto', padding: '0 1.5rem', height: '4rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         <Logo />
-        <div style={{ display: 'none' }}> {/* hidden on mobile, show on md+ with media query? simplified: always show but could be controlled via JS */} </div>
-        <NavLinks links={NAV_LINKS} />
-        <UserMenu isLoggedIn={false} />
-        <button type="button" onClick={toggleMenu} style={{ display: 'block', background: 'none', border: 'none', color: '#9ca3af', fontSize: '1.5rem', cursor: 'pointer' }} aria-label="Toggle menu">
-          ☰
-        </button>
+        <div className="hidden md:block">
+          <NavLinks links={NAV_LINKS} />
+        </div>
+        <div className="hidden md:block">
+          <UserMenu isLoggedIn={false} />
+        </div>
+        <button type="button" onClick={toggleMenu} className="block md:hidden bg-transparent border-0 text-gray-400 text-2xl cursor-pointer" aria-label="Toggle menu">☰</button>
       </div>
       {menuOpen && (
-        <div style={{ backgroundColor: 'rgba(0,0,0,0.95)', borderTop: '1px solid rgba(255,255,255,0.1)', padding: '1rem 1.5rem' }}>
+        <div className="md:hidden bg-black/95 border-t border-white/10 py-4 px-6">
           {NAV_LINKS.map((link) => (
-            <a key={link.label} href={link.href} style={{ display: 'block', padding: '0.5rem 0', color: '#9ca3af', fontSize: '0.875rem', textDecoration: 'none' }} onClick={() => setMenuOpen(false)}>
+            <a key={link.label} href={link.href} className="block py-2 text-gray-400 text-sm no-underline" onClick={() => setMenuOpen(false)}>
               {link.label}
             </a>
           ))}
@@ -424,76 +389,24 @@ function Hero() {
   }, []);
 
   return (
-    <section style={{
-      position: 'relative',
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      overflow: 'hidden'
-    }}>
-      <div style={{
-        position: 'absolute',
-        inset: 0,
-        background: 'linear-gradient(135deg, #0f172a 0%, #312e81 50%, #0f172a 100%)'
-      }} />
-      <div style={{
-        position: 'absolute',
-        top: '50%',
-        left: '50%',
-        transform: 'translate(-50%, -50%)',
-        width: '24rem',
-        height: '24rem',
-        borderRadius: '50%',
-        backgroundColor: 'rgba(99,102,241,0.2)',
-        filter: 'blur(3rem)',
-        pointerEvents: 'none'
-      }} />
-      <div style={{
-        position: 'relative',
-        zIndex: 10,
-        textAlign: 'center',
-        padding: '0 1.5rem',
-        maxWidth: '56rem',
-        margin: '0 auto',
-        transition: 'all 0.7s',
-        opacity: visible ? 1 : 0,
-        transform: visible ? 'translateY(0)' : 'translateY(2rem)'
-      }}>
-        <h1 style={{ fontSize: 'clamp(3rem, 8vw, 4.5rem)', fontWeight: 'bold', color: '#fff', lineHeight: 1.2, marginBottom: '1.5rem' }}>
+    <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
+      <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-indigo-900 to-slate-900" />
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 rounded-full bg-indigo-500/20 blur-3xl pointer-events-none" />
+      <div className={\`relative z-10 text-center px-6 max-w-4xl mx-auto transition-all duration-700 \${
+        visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'
+      }\`}>
+        <h1 className="text-5xl md:text-6xl lg:text-7xl font-bold text-white leading-tight mb-6">
           Build something{' '}
-          <span style={{ background: 'linear-gradient(135deg, #a5b4fc, #c084fc)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }}>
-            amazing
-          </span>
+          <span className="bg-gradient-to-br from-indigo-300 to-purple-400 bg-clip-text text-transparent">amazing</span>
         </h1>
-        <p style={{ fontSize: '1.25rem', color: '#9ca3af', maxWidth: '42rem', margin: '0 auto 2.5rem', lineHeight: 1.6 }}>
+        <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
           A powerful platform that helps you create, iterate, and ship products faster than ever before.
         </p>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
-          <button type="button" style={{
-            padding: '0.75rem 2rem',
-            borderRadius: '0.75rem',
-            backgroundColor: '#6366f1',
-            color: '#fff',
-            fontWeight: '600',
-            fontSize: '1.125rem',
-            border: 'none',
-            cursor: 'pointer',
-            transition: 'transform 0.15s, background-color 0.15s'
-          }}>
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+          <button type="button" className="px-8 py-3 rounded-xl bg-indigo-500 text-white font-semibold text-lg border-0 cursor-pointer transition hover:bg-indigo-600">
             Get started free
           </button>
-          <button type="button" style={{
-            padding: '0.75rem 2rem',
-            borderRadius: '0.75rem',
-            border: '1px solid rgba(255,255,255,0.2)',
-            backgroundColor: 'transparent',
-            color: '#fff',
-            fontWeight: '600',
-            fontSize: '1.125rem',
-            cursor: 'pointer',
-            transition: 'border-color 0.15s'
-          }}>
+          <button type="button" className="px-8 py-3 rounded-xl border border-white/20 bg-transparent text-white font-semibold text-lg cursor-pointer transition hover:border-white/40">
             Watch demo →
           </button>
         </div>
@@ -537,81 +450,44 @@ function MovieRow({ title = 'Featured', items = [] }) {
   }, []);
 
   return (
-    <div style={{ padding: '2rem 0' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 1.5rem', marginBottom: '1rem' }}>
-        <h2 style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#fff' }}>{title}</h2>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+    <div className="py-8">
+      <div className="flex items-center justify-between px-6 mb-4">
+        <h2 className="text-xl font-bold text-white">{title}</h2>
+        <div className="flex gap-2">
           <button
             type="button"
             onClick={() => scroll('left')}
             disabled={!canScrollLeft}
-            style={{
-              padding: '0.5rem',
-              borderRadius: '50%',
-              backgroundColor: 'rgba(255,255,255,0.1)',
-              color: '#fff',
-              opacity: canScrollLeft ? 1 : 0.3,
-              border: 'none',
-              cursor: canScrollLeft ? 'pointer' : 'default',
-              transition: 'background-color 0.15s'
-            }}
+            className={\`p-2 rounded-full bg-white/10 text-white transition-colors disabled:opacity-30 disabled:cursor-default \${
+              canScrollLeft ? 'hover:bg-white/20 cursor-pointer' : ''
+            }\`}
             aria-label="Scroll left"
-          >
-            ←
-          </button>
+          >←</button>
           <button
             type="button"
             onClick={() => scroll('right')}
             disabled={!canScrollRight}
-            style={{
-              padding: '0.5rem',
-              borderRadius: '50%',
-              backgroundColor: 'rgba(255,255,255,0.1)',
-              color: '#fff',
-              opacity: canScrollRight ? 1 : 0.3,
-              border: 'none',
-              cursor: canScrollRight ? 'pointer' : 'default',
-              transition: 'background-color 0.15s'
-            }}
+            className={\`p-2 rounded-full bg-white/10 text-white transition-colors disabled:opacity-30 disabled:cursor-default \${
+              canScrollRight ? 'hover:bg-white/20 cursor-pointer' : ''
+            }\`}
             aria-label="Scroll right"
-          >
-            →
-          </button>
+          >→</button>
         </div>
       </div>
       <div
         ref={rowRef}
-        style={{
-          display: 'flex',
-          gap: '1rem',
-          overflowX: 'auto',
-          scrollbarWidth: 'none',
-          padding: '0 1.5rem 0.5rem',
-          msOverflowStyle: 'none'
-        }}
+        className="flex gap-4 overflow-x-auto scrollbar-none px-6 pb-2"
+        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
       >
         {visibleItems.map((item, i) => (
           <div
             key={item.id ?? i}
-            style={{
-              flexShrink: 0,
-              width: '12rem',
-              borderRadius: '0.75rem',
-              overflow: 'hidden',
-              backgroundColor: 'rgba(255,255,255,0.05)',
-              cursor: 'pointer',
-              transition: 'background-color 0.15s',
-              border: '1px solid rgba(255,255,255,0.05)'
-            }}
+            className="shrink-0 w-48 rounded-xl overflow-hidden bg-white/5 cursor-pointer transition-colors border border-white/5 hover:bg-white/10"
           >
-            <div style={{ aspectRatio: '2/3', background: 'linear-gradient(135deg, rgba(99,102,241,0.3), rgba(168,85,247,0.3))' }} />
-            <div style={{ padding: '0.75rem' }}>
-              <p style={{ color: '#fff', fontSize: '0.875rem', fontWeight: '500', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {item.title ?? item.name}
-              </p>
-              <p style={{ color: '#9ca3af', fontSize: '0.75rem', marginTop: '0.125rem' }}>
-                {item.year ?? ''}
-              </p>
+            <div className="aspect-[2/3] bg-gradient-to-br from-indigo-500/30 to-purple-500/30" />
+            <div className="p-3">
+              <p className="text-white text-sm font-medium truncate">{item.title ?? item.name}</p>
+              <p className="text-gray-400 text-xs mt-0.5">{item.year ?? ''}</p>
             </div>
           </div>
         ))}
@@ -650,9 +526,9 @@ function TimerDisplay({ targetDate = null, label = 'Countdown' }) {
 
   if (!timeLeft) {
     return (
-      <div style={{ textAlign: 'center', padding: '2rem 0' }}>
-        <p style={{ color: '#9ca3af', fontSize: '1.125rem' }}>{label}</p>
-        <p style={{ color: '#fff', fontSize: '1.5rem', fontFamily: 'monospace', marginTop: '0.5rem' }}>No target date set</p>
+      <div className="text-center py-8">
+        <p className="text-gray-400 text-lg">{label}</p>
+        <p className="text-white text-2xl font-mono mt-2">No target date set</p>
       </div>
     );
   }
@@ -665,27 +541,18 @@ function TimerDisplay({ targetDate = null, label = 'Countdown' }) {
   ];
 
   return (
-    <div style={{ textAlign: 'center', padding: '3rem 1.5rem' }}>
-      <p style={{ color: '#a5b4fc', fontWeight: '500', letterSpacing: '0.1em', textTransform: 'uppercase', fontSize: '0.875rem', marginBottom: '1.5rem' }}>{label}</p>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
+    <div className="text-center py-12 px-6">
+      <p className="text-indigo-300 font-medium tracking-wider uppercase text-sm mb-6">{label}</p>
+      <div className="flex items-center justify-center gap-4">
         {units.map((unit, i) => (
-          <div key={unit.label} style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{
-                fontSize: '3rem',
-                fontFamily: 'monospace',
-                fontWeight: 'bold',
-                color: '#fff',
-                backgroundColor: 'rgba(255,255,255,0.05)',
-                borderRadius: '0.75rem',
-                padding: '1rem 1.5rem',
-                minWidth: '5rem'
-              }}>
+          <div key={unit.label} className="flex items-center gap-4">
+            <div className="text-center">
+              <div className="text-5xl font-mono font-bold text-white bg-white/5 rounded-xl py-4 px-6 min-w-[5rem]">
                 {pad(unit.value)}
               </div>
-              <p style={{ color: '#6b7280', fontSize: '0.75rem', marginTop: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{unit.label}</p>
+              <p className="text-gray-500 text-xs mt-2 uppercase tracking-wider">{unit.label}</p>
             </div>
-            {i < units.length - 1 && <span style={{ color: '#4b5563', fontSize: '2.25rem', fontWeight: '100', marginBottom: '1.5rem' }}>:</span>}
+            {i < units.length - 1 && <span className="text-gray-700 text-4xl font-thin mb-6">:</span>}
           </div>
         ))}
       </div>
@@ -732,57 +599,35 @@ function DataList({ endpoint = '', title = 'Items' }) {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '3rem 0' }}>
-        <div style={{
-          width: '2rem',
-          height: '2rem',
-          borderRadius: '50%',
-          border: '2px solid #6366f1',
-          borderTopColor: 'transparent',
-          animation: 'spin 1s linear infinite'
-        }} />
+      <div className="flex items-center justify-center py-12">
+        <div className="w-8 h-8 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div style={{ textAlign: 'center', padding: '3rem 0' }}>
-        <p style={{ color: '#f87171', marginBottom: '1rem' }}>{error}</p>
+      <div className="text-center py-12">
+        <p className="text-red-400 mb-4">{error}</p>
         <button
           type="button"
           onClick={retry}
-          style={{
-            padding: '0.5rem 1rem',
-            borderRadius: '0.5rem',
-            backgroundColor: 'rgba(239,68,68,0.2)',
-            color: '#f87171',
-            border: 'none',
-            cursor: 'pointer',
-            transition: 'background-color 0.15s'
-          }}
-        >
-          Retry
-        </button>
+          className="px-4 py-2 rounded-lg bg-red-500/20 text-red-400 border-0 cursor-pointer transition-colors hover:bg-red-500/30"
+        >Retry</button>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: '2rem 1.5rem' }}>
-      <h2 style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#fff', marginBottom: '1.5rem' }}>{title}</h2>
-      <div style={{ display: 'grid', gap: '1rem' }}>
+    <div className="py-8 px-6">
+      <h2 className="text-2xl font-bold text-white mb-6">{title}</h2>
+      <div className="grid gap-4">
         {items.map((item, i) => (
-          <div key={item.id ?? i} style={{
-            padding: '1rem',
-            borderRadius: '0.75rem',
-            backgroundColor: 'rgba(255,255,255,0.05)',
-            border: '1px solid rgba(255,255,255,0.1)'
-          }}>
-            <p style={{ color: '#fff', fontWeight: '500' }}>{item.name ?? item.title ?? String(item)}</p>
+          <div key={item.id ?? i} className="p-4 rounded-xl bg-white/5 border border-white/10">
+            <p className="text-white font-medium">{item.name ?? item.title ?? String(item)}</p>
           </div>
         ))}
-        {items.length === 0 && <p style={{ color: '#6b7280', textAlign: 'center', padding: '2rem 0' }}>No items found.</p>}
+        {items.length === 0 && <p className="text-gray-500 text-center py-8">No items found.</p>}
       </div>
     </div>
   );
@@ -825,8 +670,7 @@ export function validateGeneratedFile(file: FileContent): ValidationResult {
     errors.push(...checkBannedPackages(c, p));
     errors.push(...checkIfInJSX(c, p));
     errors.push(...checkMissingKeyProps(c, p));
-    errors.push(...checkInlineStyleUsage(c, p));
-    errors.push(...checkTailwindClasses(c, p));
+    // Tailwind validations removed — now allowed
     errors.push(...checkCssImports(c, p));
     warnings.push(...checkAsyncUseEffect(c, p));
     warnings.push(...checkMissingDepsArray(c, p));
@@ -955,7 +799,7 @@ function checkBannedPackages(c: string, p: string): string[] {
     'react-router-dom','axios','three','@react-three/fiber','@react-three/drei',
     'gsap','react-intersection-observer','@tanstack/react-query','zustand',
     'recharts','preact','styled-components','@emotion/react','@emotion/styled',
-    'classnames','framer-motion','lucide-react','clsx','tailwindcss'
+    'classnames','clsx'
   ];
   return BANNED
     .filter((pkg) => c.includes(`'${pkg}'`) || c.includes(`"${pkg}"`))
@@ -971,29 +815,6 @@ function checkIfInJSX(c: string, p: string): string[] {
 function checkMissingKeyProps(c: string, p: string): string[] {
   if (/\.map\(\s*(?:\w+|\([^)]*\))\s*=>\s*\(?\s*<[A-Za-z][^>]*(?<!\bkey=\{[^}]*\})[^/]>/.test(c)) {
     return [`[${p}] .map() may render JSX without key prop`];
-  }
-  return [];
-}
-
-function checkInlineStyleUsage(c: string, p: string): string[] {
-  const errors: string[] = [];
-  // Warn if className used extensively for styling (heuristic: >3 className with tailwind-like patterns)
-  const classNameMatches = c.match(/className\s*=\s*["'`][^"'`]*["'`]/g) ?? [];
-  if (classNameMatches.length > 3) {
-    errors.push(`[${p}] Excessive className usage (${classNameMatches.length}). Styling must be inline.`);
-  }
-  // Detect tailwind patterns in className strings
-  const tailwindPattern = /className\s*=\s*["'`][^"'`]*(?:bg-|text-|p-|px-|py-|m-|flex|grid|w-|h-|rounded-|shadow-|border-|transition-|transform|scale-|rotate-|translate-|skew-|animate-|opacity-|z-|top-|left-|right-|bottom-|inset-)[^"'`]*["'`]/;
-  if (tailwindPattern.test(c)) {
-    errors.push(`[${p}] Tailwind classes detected in className. Remove and use inline styles.`);
-  }
-  return errors;
-}
-
-function checkTailwindClasses(c: string, p: string): string[] {
-  // Look for any tailwind-like class strings even if not in className attribute (e.g., in strings)
-  if (/\b(bg-|text-|p-|px-|py-|m-|flex|grid|w-|h-|rounded-|shadow-|border-|transition-|transform|scale-|rotate-|translate-|skew-|animate-|opacity-|z-|top-|left-|right-|bottom-|inset-)[a-zA-Z0-9-]+/.test(c)) {
-    return [`[${p}] Tailwind utility class string found. Use inline styles only.`];
   }
   return [];
 }
@@ -1071,7 +892,8 @@ function checkJSON(c: string, p: string): string[] {
 export class ProjectPlanner {
 
   static async planFromPrompt(prompt: string) {
-    return planProject(prompt);
+    const designSystem = buildDesignSystem(prompt);
+    return planProject(prompt, designSystem);
   }
 
   static plan(prompt: string): BasicPlan {
@@ -1110,7 +932,7 @@ ${projectDescription}
 Path:       ${spec.path}
 Component:  ${spec.name}
 Purpose:    ${spec.description}
-Animations: ${spec.hasAnimation ? 'YES — use simple CSS-free animations via inline style and JS only (no external libraries)' : 'NO'}
+Animations: ${spec.hasAnimation ? 'YES — use framer-motion for animations' : 'NO'}
 Has data:   ${spec.hasData ? 'YES — use realistic placeholder data arrays (at least 4 items)' : 'NO'}
 
 ━━━ ALREADY GENERATED (safe to import — use exact paths below) ━━━
@@ -1125,7 +947,6 @@ useCallback((x) => fn(x), [deps])     ← dep array is SECOND arg to useCallback
 useEffect(() => { ... }, [])          ← dep array ALWAYS REQUIRED
 Sub-components (Logo, NavLinks, UserMenu) → define them IN THIS FILE if not imported above
 NEVER write explanation text after export default
-Use inline styles ONLY — no className for styling, no CSS imports, no Tailwind
 Start writing the file now:`;
   }
 
