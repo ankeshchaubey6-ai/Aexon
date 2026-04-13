@@ -1,131 +1,178 @@
-// scripts/build-snapshot.js v4.0
-// Ensures both @rollup/rollup-linux-x64-musl AND @esbuild/linux-x64
-// are present in the snapshot, regardless of build OS.
+#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
 
-const fs           = require("fs");
-const path         = require("path");
-const { execSync } = require("child_process");
+const PROJECT_ROOT = path.join(__dirname, "..");
+const NM_SOURCE = path.join(PROJECT_ROOT, "node_modules");
+const SNAPSHOT_DIR = path.join(PROJECT_ROOT, "public", "snapshot");
 
-const BASE    = path.join(__dirname, "../sandbox-templates/vite-react-base");
-const OUT     = path.join(__dirname, "../public/sandbox/snapshot");
-const OUTFILE = path.join(OUT, "node_modules.json");
-const MAX_FILE_BYTES = 5 * 1024 * 1024;
+console.log("\n═══════════════════════════════════════════════════════════════");
+console.log("WebContainer Snapshot Builder v10.0 - STREAMING CHUNKED OUTPUT");
+console.log("═══════════════════════════════════════════════════════════════\n");
 
-const BINARY_EXTS = new Set([".node",".wasm",".png",".jpg",".jpeg",".gif",".ico",".ttf",".woff",".woff2",".eot"]);
-const SKIP_DIRS   = new Set([".cache",".git","test","tests","__tests__","__mocks__","coverage","nyc_output","docs","doc","documentation","examples","example","demo","demos","bench","benchmark","benchmarks"]);
-const SKIP_FILES  = new Set(["LICENSE","LICENSE.md","license","LICENSE.txt","CHANGELOG.md","CHANGELOG","changelog.md","CONTRIBUTING.md","AUTHORS","NOTICE","README.md","readme.md","Readme.md",".npmignore",".eslintrc",".eslintrc.js",".eslintrc.json",".prettierrc",".editorconfig",".travis.yml"]);
+if (process.platform !== "linux" || process.arch !== "x64") {
+  throw new Error(`FATAL: Must build on linux-x64. Got ${process.platform}-${process.arch}`);
+}
+console.log(`[PLATFORM] ✓ linux-x64\n`);
 
-let fileCount=0, skipCount=0, errorCount=0;
+if (!fs.existsSync(NM_SOURCE)) throw new Error(`FATAL: node_modules not found`);
+if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
 
-function readVer(dir) { return JSON.parse(fs.readFileSync(path.join(dir,"package.json"),"utf8")).version; }
-
-function ensureLinuxPkg(nmDir, scope, pkgName, matchPkgDir, label) {
-  if (!fs.existsSync(path.join(nmDir, matchPkgDir, "package.json"))) {
-    console.warn(`[${label}] base package not found — skipping`); return null;
+// Clean old chunks
+for (const f of fs.readdirSync(SNAPSHOT_DIR)) {
+  if (f === "manifest.json" || f.startsWith("chunk-")) {
+    fs.rmSync(path.join(SNAPSHOT_DIR, f));
   }
-  const ver = readVer(path.join(nmDir, matchPkgDir));
-  const target = path.join(nmDir, scope, pkgName);
-  const fullPkg = `${scope}/${pkgName}@${ver}`;
-  console.log(`[${label}] version: ${ver}`);
-  if (fs.existsSync(path.join(target,"package.json")) && readVer(target)===ver) {
-    console.log(`[${label}] ✓ ${fullPkg} already present`); return ver;
-  }
-  console.log(`[${label}] Installing ${fullPkg}…`);
-  execSync(`npm install ${fullPkg} --force --ignore-scripts --no-save --legacy-peer-deps`, {cwd:BASE, stdio:"inherit"});
-  if (!fs.existsSync(path.join(target,"package.json"))) throw new Error(`[${label}] install failed — package.json missing`);
-  const got = readVer(target);
-  if (got!==ver) throw new Error(`[${label}] version mismatch: got ${got}, expected ${ver}`);
-  console.log(`[${label}] ✓ ${fullPkg} installed`);
-  return ver;
 }
 
-function readFileNode(fullPath, name) {
-  let stat; try { stat=fs.statSync(fullPath); } catch { skipCount++; return null; }
-  if (!stat.isFile()) { skipCount++; return null; }
-  if (stat.size===0)  { fileCount++; return {file:{contents:""}}; }
-  if (stat.size>MAX_FILE_BYTES) { skipCount++; return null; }
-  const ext=path.extname(name).toLowerCase();
-  try {
-    if (BINARY_EXTS.has(ext)) {
-      const buf=fs.readFileSync(fullPath); if (!buf||!buf.length) { skipCount++; return null; }
-      fileCount++; return {file:{contents:buf.toString("base64"),encoding:"base64"}};
-    } else {
-      const c=fs.readFileSync(fullPath,"utf8"); if (typeof c!=="string") { skipCount++; return null; }
-      fileCount++; return {file:{contents:c}};
-    }
-  } catch { errorCount++; return null; }
-}
+// STEP 1: Walk node_modules
+console.log("[STEP 1] Walking node_modules...");
+const allFiles = {};
+let fileCount = 0;
 
-function buildTree(dir) {
-  const result={}; let entries;
-  try { entries=fs.readdirSync(dir,{withFileTypes:true}); } catch { return result; }
+function walkDir(dir, rel = "") {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const entry of entries) {
-    const {name}=entry;
-    if (!name||SKIP_DIRS.has(name)||SKIP_FILES.has(name)||name==="__proto__"||name==="constructor"||name==="prototype") { skipCount++; continue; }
-    const fp=path.join(dir,name);
-    if (entry.isSymbolicLink()) {
-      try { const r=fs.realpathSync(fp); if (fs.statSync(r).isFile()) { const n=readFileNode(r,name); if(n)result[name]=n; } } catch { skipCount++; }
-      continue;
-    }
-    if (entry.isDirectory()) {
-      const sub=buildTree(fp); const clean={};
-      for (const [k,v] of Object.entries(sub)) if (v&&typeof v==="object"&&!Array.isArray(v)&&("file"in v||"directory"in v)) clean[k]=v;
-      if (Object.keys(clean).length>0) result[name]={directory:clean};
-      continue;
-    }
-    if (entry.isFile()) { const n=readFileNode(fp,name); if(n)result[name]=n; }
+    const fullPath = path.join(dir, entry.name);
+    const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+    try {
+      if (entry.isDirectory()) {
+        walkDir(fullPath, relPath);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        const realPath = entry.isSymbolicLink() ? fs.realpathSync(fullPath) : fullPath;
+        const stat = fs.statSync(realPath);
+        if (stat.isFile() && stat.size < 50 * 1024 * 1024) {
+          const buf = fs.readFileSync(realPath);
+          allFiles[`node_modules/${relPath}`] = buf.toString("base64");
+          fileCount++;
+          if (fileCount % 5000 === 0) console.log(`  ... ${fileCount} files`);
+        }
+      }
+    } catch { }
   }
-  return result;
 }
 
-function validateTree(node,p) {
-  if (!node||typeof node!=="object"||Array.isArray(node)) throw new Error(`[INVALID] not an object at: ${p}`);
-  if ("file"in node) { if (typeof node.file.contents!=="string") throw new Error(`[INVALID] contents not string at: ${p}`); return; }
-  if ("directory"in node) { for (const [k,v] of Object.entries(node.directory)) validateTree(v,`${p}/${k}`); return; }
-  throw new Error(`[INVALID] no file/directory at: ${p}`);
+walkDir(NM_SOURCE);
+console.log(`  ✓ ${fileCount} files collected\n`);
+
+// STEP 2: Validate esbuild
+console.log("[STEP 2] Validating esbuild binary...");
+const esbuildKey = "node_modules/@esbuild/linux-x64/bin/esbuild";
+if (!allFiles[esbuildKey]) {
+  throw new Error("FATAL: @esbuild/linux-x64/bin/esbuild missing. Run: npm install @esbuild/linux-x64 --save-optional");
+}
+console.log("  ✓ esbuild binary present\n");
+
+// STEP 3: Check for actual non-linux binaries (.node files in platform dirs)
+console.log("[STEP 3] Checking for non-Linux binaries...");
+const BLOCKED_DIRS = ["win32-x64", "win32-ia32", "win32-arm64", "darwin-x64", "darwin-arm64"];
+for (const filePath of Object.keys(allFiles)) {
+  const ext = path.extname(filePath).toLowerCase();
+  if ([".node", ".exe", ".dll"].includes(ext)) {
+    if (BLOCKED_DIRS.some(d => filePath.includes(`/${d}/`))) {
+      throw new Error(`FATAL: Non-linux binary: ${filePath}`);
+    }
+  }
+}
+console.log("  ✓ No non-Linux binaries\n");
+
+// STEP 4: Split into chunks
+console.log("[STEP 4] Splitting into chunks...");
+const esbuildChunk = {};
+const coreChunk = {};
+const deps1Chunk = {};
+const deps2Chunk = {};
+
+const CORE_PREFIXES = [
+  "node_modules/vite/",
+  "node_modules/react/",
+  "node_modules/react-dom/",
+  "node_modules/@vitejs/",
+  "node_modules/rollup/",
+  "node_modules/@rollup/",
+];
+
+const allKeys = Object.keys(allFiles);
+let depsKeys = [];
+
+for (const k of allKeys) {
+  if (k.includes("@esbuild/linux-x64")) {
+    esbuildChunk[k] = allFiles[k];
+  } else if (CORE_PREFIXES.some(p => k.startsWith(p))) {
+    coreChunk[k] = allFiles[k];
+  } else {
+    depsKeys.push(k);
+  }
 }
 
-function verifyInTree(tree,scope,pkg,ver,label) {
-  const s=tree[scope]; if (!s||!("directory"in s)) throw new Error(`FAIL: ${scope} missing (${label})`);
-  const p=(s.directory||{})[pkg]; if (!p||!("directory"in p)) throw new Error(`FAIL: ${scope}/${pkg} missing (${label})`);
-  console.log(`  ✓ ${scope}/${pkg} present`);
-  const pj=(p.directory||{})["package.json"];
-  if (pj&&"file"in pj&&ver) { const m=JSON.parse(pj.file.contents); if (m.version!==ver) throw new Error(`FAIL: ${scope}/${pkg} version ${m.version}!=${ver}`); console.log(`  ✓ version matches ${ver}`); }
+// Split deps in half
+const mid = Math.floor(depsKeys.length / 2);
+for (let i = 0; i < mid; i++) deps1Chunk[depsKeys[i]] = allFiles[depsKeys[i]];
+for (let i = mid; i < depsKeys.length; i++) deps2Chunk[depsKeys[i]] = allFiles[depsKeys[i]];
+
+console.log(`  chunk-esbuild: ${Object.keys(esbuildChunk).length} files`);
+console.log(`  chunk-core: ${Object.keys(coreChunk).length} files`);
+console.log(`  chunk-deps: ${Object.keys(deps1Chunk).length} files`);
+console.log(`  chunk-deps-2: ${Object.keys(deps2Chunk).length} files\n`);
+
+// STEP 5: Stream write chunks
+console.log("[STEP 5] Writing chunks...");
+
+function writeChunkStreaming(name, obj) {
+  const filePath = path.join(SNAPSHOT_DIR, `${name}.json`);
+  const stream = fs.createWriteStream(filePath);
+  const keys = Object.keys(obj);
+  stream.write("{");
+  for (let i = 0; i < keys.length; i++) {
+    stream.write(JSON.stringify(keys[i]) + ":" + JSON.stringify(obj[keys[i]]));
+    if (i < keys.length - 1) stream.write(",");
+  }
+  stream.write("}");
+  stream.end();
+  return new Promise((resolve, reject) => {
+    stream.on("finish", () => {
+      const mb = (fs.statSync(filePath).size / 1024 / 1024).toFixed(2);
+      console.log(`  ✓ ${name}.json: ${mb}MB`);
+      resolve(mb);
+    });
+    stream.on("error", reject);
+  });
 }
 
-// ── MAIN ─────────────────────────────────────────────────────────────────────
-console.log("━━━ WebContainer Snapshot Builder v4.0 ━━━");
-const nmDir=path.join(BASE,"node_modules");
-if (!fs.existsSync(nmDir)) { console.error(`❌ node_modules not found\n   cd sandbox-templates/vite-react-base && npm install`); process.exit(1); }
+async function main() {
+  await writeChunkStreaming("chunk-esbuild", esbuildChunk);
+  await writeChunkStreaming("chunk-core", coreChunk);
+  await writeChunkStreaming("chunk-deps", deps1Chunk);
+  await writeChunkStreaming("chunk-deps-2", deps2Chunk);
 
-console.log("\nStep 0a: Ensuring @rollup/rollup-linux-x64-musl...");
-let rollupVer;
-try { rollupVer=ensureLinuxPkg(nmDir,"@rollup","rollup-linux-x64-musl","rollup","musl"); }
-catch(e) { console.error("❌",e.message); process.exit(1); }
+  // Validate esbuild chunk
+  const esbuildChunkPath = path.join(SNAPSHOT_DIR, "chunk-esbuild.json");
+  const esbuildSizeMB = fs.statSync(esbuildChunkPath).size / 1024 / 1024;
+  if (esbuildSizeMB < 10) {
+    throw new Error(`FATAL: chunk-esbuild.json too small: ${esbuildSizeMB.toFixed(2)}MB`);
+  }
+  console.log(`\n  ✓ esbuild chunk size OK: ${esbuildSizeMB.toFixed(2)}MB`);
 
-console.log("\nStep 0b: Ensuring @esbuild/linux-x64...");
-let esbuildVer;
-try { esbuildVer=ensureLinuxPkg(nmDir,"@esbuild","linux-x64","esbuild","esbuild-linux"); }
-catch(e) { console.error("❌",e.message); process.exit(1); }
+  // Write manifest
+  const manifest = {
+    version: 1,
+    builtAt: new Date().toISOString(),
+    chunks: ["chunk-esbuild", "chunk-core", "chunk-deps", "chunk-deps-2"],
+    criticalChunks: ["chunk-esbuild", "chunk-core"],
+    validation: {
+      esbuildBinaryPresent: true,
+      totalFiles: fileCount,
+      totalChunks: 4
+    }
+  };
+  fs.writeFileSync(path.join(SNAPSHOT_DIR, "manifest.json"), JSON.stringify(manifest, null, 2));
 
-console.log("\nStep 1: Building file tree...");
-const t0=Date.now(); const tree=buildTree(nmDir);
-console.log(`  Packages: ${Object.keys(tree).length}  Files: ${fileCount}  Skipped: ${skipCount}  Errors: ${errorCount}  Time: ${((Date.now()-t0)/1000).toFixed(1)}s`);
-if (!Object.keys(tree).length) { console.error("❌ Empty tree"); process.exit(1); }
+  console.log("\n═══════════════════════════════════════════════════════════════");
+  console.log("✅ SNAPSHOT BUILT SUCCESSFULLY");
+  console.log("═══════════════════════════════════════════════════════════════");
+  console.log(`Total files: ${fileCount}`);
+  console.log(`Output: ${SNAPSHOT_DIR}\n`);
+}
 
-console.log("\nStep 2: Validating...");
-let errs=0;
-for (const [k,v] of Object.entries(tree)) { try { validateTree(v,`node_modules/${k}`); } catch(e) { console.error(" ✗",e.message); errs++; } }
-if (errs) { console.error(`❌ ${errs} errors`); process.exit(1); }
-console.log("  ✓ All valid");
-
-console.log("\nStep 3: Integrity checks...");
-try { verifyInTree(tree,"@rollup","rollup-linux-x64-musl",rollupVer,"rollup"); } catch(e) { console.error("❌",e.message); process.exit(1); }
-if (esbuildVer) { try { verifyInTree(tree,"@esbuild","linux-x64",esbuildVer,"esbuild"); } catch(e) { console.error("❌",e.message); process.exit(1); } }
-
-console.log("\nStep 4: Writing JSON...");
-fs.mkdirSync(OUT,{recursive:true});
-fs.writeFileSync(OUTFILE, JSON.stringify({node_modules:{directory:tree}}));
-const sz=(fs.statSync(OUTFILE).size/1024/1024).toFixed(1);
-console.log(`\n✅ Done — ${OUTFILE} (${sz}MB, ${Object.keys(tree).length} packages, ${fileCount} files)`);
-if (parseFloat(sz)>50) console.warn(`⚠️  ${sz}MB snapshot — consider CDN hosting`);
+main().catch(e => { console.error("FATAL:", e.message); process.exit(1); });
