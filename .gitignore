@@ -20,6 +20,9 @@
 .DS_Store
 *.pem
 
+# Old snapshot format (replaced by chunked snapshots in public/snapshot/)
+public/node_modules.json
+
 # IDE
 .idea
 .vscode

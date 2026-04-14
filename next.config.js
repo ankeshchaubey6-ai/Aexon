@@ -13,15 +13,21 @@ const nextConfig = {
   async headers() {
     return [
       {
+        // Apply to ALL routes — WebContainer requires crossOriginIsolated = true
         source: "/(.*)",
         headers: [
           {
             key: "Cross-Origin-Opener-Policy",
-            value: "same-origin",           // was: same-origin-allow-popups
+            // same-origin: required for SharedArrayBuffer / WebContainer
+            value: "same-origin",
           },
           {
             key: "Cross-Origin-Embedder-Policy",
-            value: "require-corp",          // was: credentialless
+            // credentialless: enables crossOriginIsolated WITHOUT blocking
+            // third-party resources (Clerk, Cloudinary, Google Fonts, Stripe).
+            // require-corp breaks any external resource that doesn't send
+            // Cross-Origin-Resource-Policy, including Clerk's auth iframes.
+            value: "credentialless",
           },
         ],
       },

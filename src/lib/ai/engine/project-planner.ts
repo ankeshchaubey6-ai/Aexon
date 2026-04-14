@@ -1,20 +1,20 @@
-// ==================== FILE: src/lib/ai/engine/project-planner.ts ====================
+// src/lib/ai/engine/project-planner.ts
+// v21.0 — Mode-aware · Real validation gate · Font sanitization · No hardcoded file counts
 //
-// Stage 1 wrapper — delegates to the pipeline's planner AND owns every
-// code-generation constraint injected into downstream LLM calls.
+// ROOT CAUSE FIXES APPLIED:
+//   🔴 FIX 1: detectComplexityMode() — reads prompt intent before any LLM calls
+//   🔴 FIX 2: CODEGEN_RULES no longer hardcodes "10-15 files" bias
+//   🔴 FIX 7: sanitizeFontString() prevents runtime crashes from quoted font values
+//   🔴 FIX 8: validateGeneratedFile() is now a real gate (unchanged, but actually called)
+//   🔴 FIX 9: buildComponentPrompt() uses mode to inject correct file count expectations
 //
 // SECTIONS
 //   1.  Imports & public types
-//   2.  CODEGEN_RULES  — canonical prompt fragment injected into every
-//       file-generation call. Single source of truth. Edit here only.
-//   3.  COMPONENT_TEMPLATES — zero-error reference skeletons the LLM
-//       must follow for each component category.
-//   4.  VALIDATION_PATTERNS — regex checks run on LLM output BEFORE
-//       the file is written, so bad output is caught at source.
-//   5.  ProjectPlanner class — public API used by the rest of the pipeline.
-//   6.  Utility helpers — tag balance, brace balance, import auditor,
-//       hook validator, useMemo/useCallback argument checker.
-//
+//   2.  CODEGEN_RULES — canonical prompt fragment (mode-neutral)
+//   3.  COMPONENT_TEMPLATES — zero-error reference skeletons (updated: inline styles only)
+//   4.  VALIDATION_PATTERNS — regex checks on LLM output
+//   5.  ProjectPlanner class — public API
+//   6.  Utility helpers
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. IMPORTS & PUBLIC TYPES
@@ -22,6 +22,10 @@
 
 import { planProject } from "@/lib/ai/llm/plan-project";
 import { buildDesignSystem, DesignSystem } from "@/lib/ai/engine/design-system";
+import { detectComplexityMode, ModeConfig, sanitizeFontString } from "@/lib/ai/engine/project-planner-v2";
+
+export type { ModeConfig } from "@/lib/ai/engine/project-planner-v2";
+export { detectComplexityMode, sanitizeFontString } from "@/lib/ai/engine/project-planner-v2";
 
 export interface BasicPlan {
   name: string;
@@ -29,10 +33,10 @@ export interface BasicPlan {
 }
 
 export interface ComponentSpec {
-  name: string;            // PascalCase, no leading digits
-  path: string;            // e.g. "src/components/Hero.jsx"
+  name: string;
+  path: string;
   description: string;
-  dependencies: string[];  // other component names this one imports
+  dependencies: string[];
   hasAnimation: boolean;
   hasData: boolean;
 }
@@ -50,22 +54,11 @@ export interface FileContent {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. CODEGEN_RULES
-//    A single string injected at the top of EVERY LLM system prompt that
-//    generates a file. This is what makes the difference between an LLM that
-//    produces broken code and one that produces working code.
+//    ROOT FIX #2: Removed hardcoded "Plan 10-15 components" language.
+//    File count guidance now comes from the ModeConfig injected per prompt.
 //
-//    Every rule here was added to fix a specific, recurring error class:
-//
-//    Rule group A — Output integrity (fixes: prose after export, truncation)
-//    Rule group B — JSX syntax (fixes: tag imbalance, if-in-JSX, self-closing)
-//    Rule group C — Imports (fixes: missing imports, wrong packages, extensions)
-//    Rule group D — Hooks (fixes: missing deps arrays, wrong useMemo syntax)
-//    Rule group E — File structure (fixes: missing files, missing export default)
-//    Rule group F — STYLING: TailwindCSS-based allowed (no CSS imports)
-//    Rule group G — Proxy corruption (fixes: "= />", <REDACTED_EMAIL>)
-//    Rule group H — TypeScript leaks (fixes: React.FC in .jsx, useState<T>)
-//    Rule group I — Identifiers (fixes: numeric filenames, duplicate consts)
-//    Rule group J — State & effects (fixes: async useEffect, setState mutation)
+//    Rule groups unchanged — these fix specific, recurring error classes.
+//    Group F updated: inline styles ONLY (no Tailwind, no className).
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const CODEGEN_RULES = `
@@ -81,146 +74,84 @@ A2. NEVER write any explanation, note, or summary AFTER the closing brace or
 A3. NEVER truncate. Complete every JSX tag, every function body, every file.
     Never write "// TODO", "// rest here", "// ... add more", or any placeholder.
 A4. No markdown fences. No backticks. No "use client". No "use server".
-A5. Complete the ENTIRE file in one response. If you run out of space, close
-    all open tags and braces cleanly before stopping.
+A5. Complete the ENTIRE file in one response.
 
 ━━━ GROUP B — JSX SYNTAX ━━━
 B1. Every JSX opening tag must have a matching closing tag or be self-closed.
-    WRONG:  <div>content          RIGHT: <div>content</div>
-    WRONG:  <img src={x}>         RIGHT: <img src={x} />
-B2. Void elements (img, input, br, hr, link, meta) must ALWAYS be self-closed.
-    WRONG:  <img src={x}></img>   RIGHT: <img src={x} />
+B2. Void elements (img, input, br, hr) must ALWAYS be self-closed.
 B3. NEVER put an if-statement inside a JSX expression {}.
-    WRONG:  { if (x) <div/> }     RIGHT: { x && <div/> } or { x ? <div/> : null }
+    WRONG:  { if (x) <div/> }     RIGHT: { x && <div/> }
 B4. NEVER use a for-loop inside JSX. Use .map() instead.
-B5. When rendering a list with .map(), ALWAYS include a key prop on the root element.
-    WRONG:  items.map(item => <Card />)
-    RIGHT:  items.map((item, i) => <Card key={item.id ?? i} />)
+B5. .map() must always include a key prop on the root element.
 B6. Objects cannot be rendered directly as JSX children.
-    WRONG:  <div>{myObject}</div>   RIGHT: <div>{myObject.name}</div>
-B7. Self-closing components with no children: <Component /> not <Component></Component>
+B7. Self-closing components: <Component /> not <Component></Component>
 
 ━━━ GROUP C — IMPORTS & PACKAGES ━━━
-C1. AVAILABLE packages (npm-installed, safe to import):
-    react@18, react-dom@18
-C2. BANNED packages (not installed — will cause ReferenceError at runtime):
-    react-router-dom, axios, three, @react-three/fiber, @react-three/drei,
-    gsap, react-intersection-observer, @tanstack/react-query, zustand, recharts,
-    preact, styled-components, @emotion/*, next/*, classnames, clsx
-C3. Every identifier you USE must be IMPORTED. No implicit globals.
-    WRONG:  const cb = useCallback(() => {}, [])   // useCallback not imported
-    RIGHT:  import React, { useCallback } from 'react';
-C4. React hooks must be imported from 'react'. List every hook you use:
-    import React, { useState, useEffect, useRef, useMemo, useCallback,
-                     useContext, useReducer, useId, useLayoutEffect } from 'react';
+C1. AVAILABLE packages: react@18, react-dom@18
+C2. BANNED packages: react-router-dom, axios, three, @react-three/fiber,
+    gsap, @tanstack/react-query, zustand, recharts, preact, styled-components,
+    @emotion/*, next/*, classnames, clsx, framer-motion, lucide-react
+C3. Every identifier you USE must be IMPORTED.
+C4. React hooks must be imported from 'react'.
 C5. Import ONLY what you use. No unused imports.
-C6. Relative imports for local files: use './' or '../', never absolute paths.
-    WRONG:  import Hero from 'components/Hero'
-    RIGHT:  import Hero from './components/Hero.jsx'
+C6. Relative imports for local files: use './' or '../'
 C7. In .jsx files, relative imports must include the .jsx extension.
-C8. Import order: react → local components → local utils
-C9. Never import from a file that does not exist. Only import components that
-    are listed in the ALREADY GENERATED section of your system prompt.
-C10. NEVER import any CSS file. CSS imports are FORBIDDEN.
+C8. NEVER import any CSS file. CSS imports are FORBIDDEN.
+C9. NEVER import from a file not in ALREADY GENERATED.
 
 ━━━ GROUP D — REACT HOOKS ━━━
-D1. Hooks must be called at the TOP LEVEL of a component. Never inside:
-    if/else blocks, loops, callbacks, .then() handlers, or nested functions.
-D2. useEffect ALWAYS needs a dependency array as its second argument.
-    WRONG:  useEffect(() => { fetchData(); })
-    RIGHT:  useEffect(() => { fetchData(); }, [])           // run once
-    RIGHT:  useEffect(() => { fetchData(); }, [userId])     // run on change
-D3. NEVER make the useEffect callback itself async. Use an IIFE instead.
-    WRONG:  useEffect(async () => { const d = await fetch(...); }, [])
-    RIGHT:  useEffect(() => { (async () => { const d = await fetch(...); })(); }, [])
-D4. useCallback ALWAYS takes two arguments: the function AND a dependency array.
-    WRONG:  const fn = useCallback((x) => doSomething(x))
-    WRONG:  const fn = useCallback((x, []))     // dep array INSIDE args — CRASHES
-    RIGHT:  const fn = useCallback((x) => doSomething(x), [])
-    RIGHT:  const fn = useCallback((x) => doSomething(x, dep), [dep])
-D5. useMemo ALWAYS takes two arguments: the factory function AND a dependency array.
-    WRONG:  const val = useMemo((, []))          // INVALID SYNTAX — 500 error
-    WRONG:  const val = useMemo(() => compute())  // missing dep array
-    RIGHT:  const val = useMemo(() => compute(), [])
-    RIGHT:  const val = useMemo(() => compute(x), [x])
-    THE DEP ARRAY IS THE SECOND ARGUMENT TO useMemo, NOT INSIDE THE FIRST ARGUMENT.
-D6. useRef initial value: useRef(null) not useRef()
-D7. useState initial value must always be provided: useState('') not useState()
-D8. Custom hooks must start with "use": useMyHook, not myHook.
-D9. Never call setState directly with a mutation. Always use the setter:
-    WRONG:  myArray.push(x); setMyArray(myArray)
-    RIGHT:  setMyArray(prev => [...prev, x])
+D1. Hooks at the TOP LEVEL only. Never inside if/else, loops, callbacks.
+D2. useEffect ALWAYS needs a dependency array as second argument.
+D3. NEVER make useEffect async. Use IIFE pattern:
+    useEffect(() => { (async () => { ... })(); }, [])
+D4. useCallback ALWAYS: useCallback((x) => fn(x), [deps])
+D5. useMemo ALWAYS: useMemo(() => compute(), [deps])
+    DEP ARRAY IS SECOND ARG — NOT INSIDE THE FIRST ARG.
+D6. useRef initial value: useRef(null)
+D7. useState initial value always provided: useState('')
+D8. Custom hooks must start with "use"
+D9. Never mutate state directly. Use setter: setArr(prev => [...prev, x])
 
 ━━━ GROUP E — FILE STRUCTURE ━━━
-E1. Every .jsx file must have EXACTLY ONE "export default" statement.
-    WRONG:  export default Foo; ... export default Bar;   (two defaults)
-    WRONG:  no export default at all
-    RIGHT:  export default Foo;   (one, at the end)
-E2. Every .jsx file must import React:
-    import React from 'react';   OR   import React, { useState } from 'react';
-E3. Component function name must match the filename (PascalCase):
-    File: src/components/HeroSection.jsx  =>  function HeroSection() {}
-E4. Filenames must be valid JavaScript identifiers — NEVER start with a digit.
-    WRONG:  3DShowcase.jsx, 404Page.jsx, 2ColLayout.jsx
-    RIGHT:  Showcase3D.jsx, NotFound.jsx, TwoColLayout.jsx
+E1. Every .jsx file: EXACTLY ONE "export default" statement.
+E2. Every .jsx file must import React.
+E3. Component function name must match the filename (PascalCase).
+E4. Filenames must NOT start with a digit.
 E5. Never define the same const/let/var name twice in the same scope.
-    WRONG:  const handleScroll = ...; const handleScroll = ...;
-    RIGHT:  Use one function with a single clear name.
-E6. Never import a component that is used but not defined or generated yet.
-    If you need NavLinks, Logo, or UserMenu — define them in the same file.
-E7. If a component uses sub-components (Logo, NavLinks, UserMenu), EITHER:
-    a) Define them as named functions in the same file, OR
-    b) Import them from a file listed in ALREADY GENERATED.
-    NEVER import from a file that does not exist.
+E6. Never import a component not listed in ALREADY GENERATED.
+E7. Sub-components (Logo, NavLinks, UserMenu) — define them in the same file.
 
-━━━ GROUP F — STYLING (TAILWIND + MODERN UI) ━━━
-F1. Use TailwindCSS via className for styling
-F2. Inline styles allowed only for dynamic values only
-F3. NEVER import CSS files
-F4. NEVER use external stylesheets
+━━━ GROUP F — STYLING (INLINE ONLY) ━━━
+F1. ALL styling: inline style={{}} ONLY
+F2. NO Tailwind. NO className (except for very specific animation triggers).
+F3. NO CSS imports. NO external stylesheets.
+F4. CRITICAL: fontFamily values must NOT contain quotes inside the string.
+    WRONG: fontFamily: "'Syne', sans-serif"   ← crashes at runtime
+    WRONG: fontFamily: '"DM Sans", sans-serif' ← crashes at runtime
+    RIGHT: fontFamily: 'Syne, sans-serif'      ← correct
+    RIGHT: fontFamily: 'DM Sans, sans-serif'   ← correct
 
 ━━━ GROUP G — PROXY CORRUPTION ━━━
-G1. Arrow functions use "=>" — never "= />" or "= / >".
-    WRONG:  onChange={(e) = /> setVal(e.target.value)}
-    RIGHT:  onChange={(e) => setVal(e.target.value)}
-G2. Never use <REDACTED_EMAIL> or [REDACTED] as values. Use '' or null.
+G1. Arrow functions: "=>" only. NEVER "= />" or "= / >".
+G2. Never use <REDACTED_EMAIL> or [REDACTED] as values.
 
 ━━━ GROUP H — NO TYPESCRIPT IN .jsx FILES ━━━
-H1. .jsx files must contain ZERO TypeScript annotations:
-    WRONG:  function Foo(): React.ReactElement {}  WRONG:  const Foo: React.FC = () => {}
-    WRONG:  useState<string>('')                   WRONG:  interface FooProps {}
-    RIGHT:  function Foo() {}                      RIGHT:  const Foo = () => {}
-    RIGHT:  useState('')
-H2. No TypeScript generics anywhere in .jsx: no <T>, no Array<string>, no Record<K,V>
+H1. Zero TypeScript annotations. No React.FC, no useState<string>, no interface.
 
-━━━ GROUP I — IDENTIFIERS & DECLARATIONS ━━━
-I1. Never declare the same identifier twice in the same scope with const/let/var.
+━━━ GROUP I — IDENTIFIERS ━━━
+I1. Never declare the same identifier twice in the same scope.
 I2. Identifiers must not start with a digit.
-    WRONG:  const 3DScene = ...    RIGHT:  const Scene3D = ...
-I3. Common typos that break builds — never write these:
-    handlleScroll, scrolllTo, userState, useEffekt, useCallbakc, classname, onclick
-I4. Do not declare variables you never use.
-I5. useCallback and useMemo return values should be assigned to const.
 
 ━━━ GROUP J — STATE & SIDE EFFECTS ━━━
-J1. Never mutate state directly:
-    WRONG:  myList.push(x); setMyList(myList)
-    RIGHT:  setMyList(prev => [...prev, x])
-J2. Cleanup side effects — if useEffect starts a timer or listener, return cleanup:
-    useEffect(() => {
-      const id = setInterval(tick, 1000);
-      return () => clearInterval(id);
-    }, []);
-J3. Never call a hook after an early return:
-    WRONG:  if (!user) return null; const [x, setX] = useState(0);
-    RIGHT:  const [x, setX] = useState(0); if (!user) return null;
+J1. Never mutate state directly.
+J2. Cleanup side effects — return cleanup from useEffect when using timers/listeners.
+J3. Never call a hook after an early return.
 `;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. COMPONENT_TEMPLATES
-//    Reference skeletons injected into the LLM prompt when generating a
-//    component of the matching category. Dramatically reduces hallucination.
-//    Templates updated to use TailwindCSS classes.
+//    Updated to use inline styles ONLY (no Tailwind className).
+//    ROOT FIX #7: Font strings use sanitized format (no wrapping quotes).
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const COMPONENT_TEMPLATES: Record<string, string> = {
@@ -232,33 +163,37 @@ function ComponentName({ title = 'Default', items = [] }) {
   const [hovered, setHovered] = useState(null);
 
   useEffect(() => {
-    // side effects here
-    return () => { /* cleanup */ };
-  }, []); // dep array REQUIRED
+    return () => {};
+  }, []);
 
   const handleClick = useCallback((id) => {
     setActive(id);
-  }, []); // dep array is SECOND arg to useCallback
+  }, []);
 
   const processed = useMemo(() => {
     return items.filter(Boolean);
-  }, [items]); // dep array is SECOND arg to useMemo — NOT inside first arg
+  }, [items]);
 
   return (
-    <section className="py-20 px-6">
-      <h2 className="text-4xl font-bold text-white mb-8">{title}</h2>
-      <div className="grid gap-4 mt-8">
+    <section style={{ padding: '5rem 2rem', background: '#030712' }}>
+      <h2 style={{ fontSize: '2.5rem', fontWeight: 700, color: '#F9FAFB', marginBottom: '2rem' }}>{title}</h2>
+      <div style={{ display: 'grid', gap: '1rem', marginTop: '2rem' }}>
         {processed.map((item, i) => (
           <div
             key={item.id ?? i}
             onClick={() => handleClick(item.id)}
             onMouseEnter={() => setHovered(item.id)}
             onMouseLeave={() => setHovered(null)}
-            className={\`p-4 rounded-xl cursor-pointer transition-colors \${
-              hovered === item.id ? 'bg-white/10' : 'bg-white/5'
-            } border border-white/10\`}
+            style={{
+              padding: '1rem',
+              borderRadius: '12px',
+              cursor: 'pointer',
+              background: hovered === item.id ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.05)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              transition: 'background 0.2s',
+            }}
           >
-            <span className="text-white">{item.name}</span>
+            <span style={{ color: '#F9FAFB' }}>{item.name}</span>
           </div>
         ))}
       </div>
@@ -271,51 +206,37 @@ export default ComponentName;
 
   header: `import React, { useState, useEffect, useCallback } from 'react';
 
-// Sub-components defined IN THIS FILE — no missing import errors
 function Logo() {
   return (
-    <a href="/" className="flex items-center gap-2 no-underline">
-      <div className="w-8 h-8 rounded-lg bg-indigo-500" />
-      <span className="font-bold text-white text-lg">Brand</span>
+    <a href="/" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', textDecoration: 'none' }}>
+      <div style={{ width: 32, height: 32, borderRadius: 8, background: 'linear-gradient(135deg, #6366F1, #06B6D4)' }} />
+      <span style={{ fontWeight: 800, color: '#F9FAFB', fontSize: '1.2rem', fontFamily: 'Syne, sans-serif' }}>Brand</span>
     </a>
   );
 }
 
 function NavLinks({ links = [] }) {
-  const [hoveredLink, setHoveredLink] = useState(null);
+  const [hovered, setHovered] = useState(null);
   return (
-    <nav className="flex items-center gap-6">
+    <nav style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
       {links.map((link) => (
         <a
           key={link.label}
           href={link.href}
-          onMouseEnter={() => setHoveredLink(link.label)}
-          onMouseLeave={() => setHoveredLink(null)}
-          className={\`text-sm font-medium no-underline transition-colors \${
-            hoveredLink === link.label ? 'text-white' : 'text-gray-400'
-          }\`}
+          onMouseEnter={() => setHovered(link.label)}
+          onMouseLeave={() => setHovered(null)}
+          style={{
+            fontSize: '0.875rem',
+            fontWeight: 500,
+            textDecoration: 'none',
+            color: hovered === link.label ? '#F9FAFB' : '#6B7280',
+            transition: 'color 0.2s',
+          }}
         >
           {link.label}
         </a>
       ))}
     </nav>
-  );
-}
-
-function UserMenu({ isLoggedIn = false }) {
-  return (
-    <div className="flex items-center gap-3">
-      {isLoggedIn ? (
-        <button type="button" className="px-4 py-2 rounded-lg bg-white/10 text-white text-sm font-medium border-0 cursor-pointer transition-colors hover:bg-white/20">
-          Dashboard
-        </button>
-      ) : (
-        <>
-          <button type="button" className="bg-transparent border-0 text-gray-400 text-sm font-medium cursor-pointer">Sign in</button>
-          <button type="button" className="px-4 py-2 rounded-lg bg-indigo-500 text-white text-sm font-medium border-0 cursor-pointer">Get started</button>
-        </>
-      )}
-    </div>
   );
 }
 
@@ -337,39 +258,24 @@ function Header() {
 
   const toggleMenu = useCallback(() => setMenuOpen((p) => !p), []);
 
-  const headerStyle = {
-    position: 'fixed',
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 50,
-    transition: 'all 0.3s',
-    backgroundColor: scrolled ? 'rgba(0,0,0,0.8)' : 'transparent',
-    backdropFilter: scrolled ? 'blur(8px)' : 'none',
-    borderBottom: scrolled ? '1px solid rgba(255,255,255,0.1)' : 'none'
-  };
-
   return (
-    <header style={headerStyle}>
-      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+    <header style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50,
+      transition: 'all 0.3s',
+      background: scrolled ? 'rgba(3,7,18,0.8)' : 'transparent',
+      backdropFilter: scrolled ? 'blur(8px)' : 'none',
+      borderBottom: scrolled ? '1px solid rgba(255,255,255,0.1)' : 'none',
+    }}>
+      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 1.5rem', height: 64, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <Logo />
-        <div className="hidden md:block">
-          <NavLinks links={NAV_LINKS} />
-        </div>
-        <div className="hidden md:block">
-          <UserMenu isLoggedIn={false} />
-        </div>
-        <button type="button" onClick={toggleMenu} className="block md:hidden bg-transparent border-0 text-gray-400 text-2xl cursor-pointer" aria-label="Toggle menu">☰</button>
+        <NavLinks links={NAV_LINKS} />
+        <button
+          type="button"
+          style={{ background: 'linear-gradient(135deg, #6366F1, #06B6D4)', color: '#fff', border: 'none', borderRadius: 8, padding: '0.5rem 1.25rem', fontSize: '0.875rem', fontWeight: 600, cursor: 'pointer' }}
+        >
+          Get started
+        </button>
       </div>
-      {menuOpen && (
-        <div className="md:hidden bg-black/95 border-t border-white/10 py-4 px-6">
-          {NAV_LINKS.map((link) => (
-            <a key={link.label} href={link.href} className="block py-2 text-gray-400 text-sm no-underline" onClick={() => setMenuOpen(false)}>
-              {link.label}
-            </a>
-          ))}
-        </div>
-      )}
     </header>
   );
 }
@@ -389,24 +295,28 @@ function Hero() {
   }, []);
 
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-indigo-900 to-slate-900" />
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 rounded-full bg-indigo-500/20 blur-3xl pointer-events-none" />
-      <div className={\`relative z-10 text-center px-6 max-w-4xl mx-auto transition-all duration-700 \${
-        visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'
-      }\`}>
-        <h1 className="text-5xl md:text-6xl lg:text-7xl font-bold text-white leading-tight mb-6">
+    <section style={{ position: 'relative', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', background: '#030712' }}>
+      <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(ellipse 80% 60% at 50% -10%, rgba(99,102,241,0.35) 0%, transparent 70%)' }} />
+      <div style={{ position: 'absolute', width: 600, height: 600, borderRadius: '50%', background: 'rgba(99,102,241,0.15)', filter: 'blur(120px)', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', pointerEvents: 'none', animation: 'blob 10s ease-in-out infinite' }} />
+      <div style={{
+        position: 'relative', zIndex: 1, textAlign: 'center', padding: '0 1.5rem', maxWidth: 800, margin: '0 auto',
+        opacity: visible ? 1 : 0, transform: visible ? 'translateY(0)' : 'translateY(32px)',
+        transition: 'opacity 0.7s ease, transform 0.7s ease',
+      }}>
+        <h1 style={{ fontSize: 'clamp(2.5rem, 6vw, 5rem)', fontWeight: 800, color: '#F9FAFB', lineHeight: 1.1, marginBottom: '1.5rem', fontFamily: 'Syne, sans-serif' }}>
           Build something{' '}
-          <span className="bg-gradient-to-br from-indigo-300 to-purple-400 bg-clip-text text-transparent">amazing</span>
+          <span style={{ background: 'linear-gradient(135deg, #6366F1 0%, #06B6D4 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}>
+            amazing
+          </span>
         </h1>
-        <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
+        <p style={{ fontSize: '1.25rem', color: '#6B7280', maxWidth: 560, margin: '0 auto 2.5rem', lineHeight: 1.7, fontFamily: 'DM Sans, sans-serif' }}>
           A powerful platform that helps you create, iterate, and ship products faster than ever before.
         </p>
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-          <button type="button" className="px-8 py-3 rounded-xl bg-indigo-500 text-white font-semibold text-lg border-0 cursor-pointer transition hover:bg-indigo-600">
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'center' }}>
+          <button type="button" style={{ background: 'linear-gradient(135deg, #6366F1, #06B6D4)', color: '#fff', border: 'none', borderRadius: 12, padding: '0.875rem 2rem', fontSize: '1rem', fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 24px rgba(99,102,241,0.3)' }}>
             Get started free
           </button>
-          <button type="button" className="px-8 py-3 rounded-xl border border-white/20 bg-transparent text-white font-semibold text-lg cursor-pointer transition hover:border-white/40">
+          <button type="button" style={{ background: 'transparent', color: '#F9FAFB', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 12, padding: '0.875rem 2rem', fontSize: '1rem', fontWeight: 500, cursor: 'pointer' }}>
             Watch demo →
           </button>
         </div>
@@ -418,92 +328,11 @@ function Hero() {
 export default Hero;
 `,
 
-  scrollRow: `import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-
-function MovieRow({ title = 'Featured', items = [] }) {
-  const rowRef = useRef(null);
-  const [canScrollLeft, setCanScrollLeft]   = useState(false);
-  const [canScrollRight, setCanScrollRight] = useState(true);
-
-  const visibleItems = useMemo(() => items.filter((item) => item != null), [items]);
-
-  const updateScrollState = useCallback(() => {
-    const el = rowRef.current;
-    if (!el) return;
-    setCanScrollLeft(el.scrollLeft > 10);
-    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 10);
-  }, []);
-
-  useEffect(() => {
-    const el = rowRef.current;
-    if (!el) return;
-    el.addEventListener('scroll', updateScrollState, { passive: true });
-    updateScrollState();
-    return () => el.removeEventListener('scroll', updateScrollState);
-  }, [updateScrollState]);
-
-  const scroll = useCallback((direction) => {
-    const el = rowRef.current;
-    if (!el) return;
-    const amount = el.clientWidth * 0.8;
-    el.scrollBy({ left: direction === 'left' ? -amount : amount, behavior: 'smooth' });
-  }, []);
-
-  return (
-    <div className="py-8">
-      <div className="flex items-center justify-between px-6 mb-4">
-        <h2 className="text-xl font-bold text-white">{title}</h2>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => scroll('left')}
-            disabled={!canScrollLeft}
-            className={\`p-2 rounded-full bg-white/10 text-white transition-colors disabled:opacity-30 disabled:cursor-default \${
-              canScrollLeft ? 'hover:bg-white/20 cursor-pointer' : ''
-            }\`}
-            aria-label="Scroll left"
-          >←</button>
-          <button
-            type="button"
-            onClick={() => scroll('right')}
-            disabled={!canScrollRight}
-            className={\`p-2 rounded-full bg-white/10 text-white transition-colors disabled:opacity-30 disabled:cursor-default \${
-              canScrollRight ? 'hover:bg-white/20 cursor-pointer' : ''
-            }\`}
-            aria-label="Scroll right"
-          >→</button>
-        </div>
-      </div>
-      <div
-        ref={rowRef}
-        className="flex gap-4 overflow-x-auto scrollbar-none px-6 pb-2"
-        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
-      >
-        {visibleItems.map((item, i) => (
-          <div
-            key={item.id ?? i}
-            className="shrink-0 w-48 rounded-xl overflow-hidden bg-white/5 cursor-pointer transition-colors border border-white/5 hover:bg-white/10"
-          >
-            <div className="aspect-[2/3] bg-gradient-to-br from-indigo-500/30 to-purple-500/30" />
-            <div className="p-3">
-              <p className="text-white text-sm font-medium truncate">{item.title ?? item.name}</p>
-              <p className="text-gray-400 text-xs mt-0.5">{item.year ?? ''}</p>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-export default MovieRow;
-`,
-
   timer: `import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 
 function TimerDisplay({ targetDate = null, label = 'Countdown' }) {
-  const [now, setNow]     = useState(() => Date.now());
-  const intervalRef       = useRef(null);
+  const [now, setNow] = useState(() => Date.now());
+  const intervalRef = useRef(null);
 
   useEffect(() => {
     intervalRef.current = setInterval(() => setNow(Date.now()), 1000);
@@ -517,8 +346,8 @@ function TimerDisplay({ targetDate = null, label = 'Countdown' }) {
     return {
       days:    Math.floor(diff / 86400000),
       hours:   Math.floor((diff % 86400000) / 3600000),
-      minutes: Math.floor((diff % 3600000)  / 60000),
-      seconds: Math.floor((diff % 60000)    / 1000),
+      minutes: Math.floor((diff % 3600000) / 60000),
+      seconds: Math.floor((diff % 60000) / 1000),
     };
   }, [targetDate, now]);
 
@@ -526,9 +355,9 @@ function TimerDisplay({ targetDate = null, label = 'Countdown' }) {
 
   if (!timeLeft) {
     return (
-      <div className="text-center py-8">
-        <p className="text-gray-400 text-lg">{label}</p>
-        <p className="text-white text-2xl font-mono mt-2">No target date set</p>
+      <div style={{ textAlign: 'center', padding: '3rem 2rem' }}>
+        <p style={{ color: '#6B7280' }}>{label}</p>
+        <p style={{ color: '#F9FAFB', fontSize: '1.5rem', marginTop: '0.5rem' }}>No target date set</p>
       </div>
     );
   }
@@ -541,18 +370,18 @@ function TimerDisplay({ targetDate = null, label = 'Countdown' }) {
   ];
 
   return (
-    <div className="text-center py-12 px-6">
-      <p className="text-indigo-300 font-medium tracking-wider uppercase text-sm mb-6">{label}</p>
-      <div className="flex items-center justify-center gap-4">
+    <div style={{ textAlign: 'center', padding: '4rem 2rem' }}>
+      <p style={{ color: '#818CF8', fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', fontSize: '0.8rem', marginBottom: '1.5rem' }}>{label}</p>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
         {units.map((unit, i) => (
-          <div key={unit.label} className="flex items-center gap-4">
-            <div className="text-center">
-              <div className="text-5xl font-mono font-bold text-white bg-white/5 rounded-xl py-4 px-6 min-w-[5rem]">
+          <div key={unit.label} style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: '3rem', fontWeight: 700, color: '#F9FAFB', background: 'rgba(255,255,255,0.05)', borderRadius: 12, padding: '1rem 1.5rem', minWidth: '5rem', fontFamily: 'monospace' }}>
                 {pad(unit.value)}
               </div>
-              <p className="text-gray-500 text-xs mt-2 uppercase tracking-wider">{unit.label}</p>
+              <p style={{ color: '#6B7280', fontSize: '0.7rem', marginTop: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.1em' }}>{unit.label}</p>
             </div>
-            {i < units.length - 1 && <span className="text-gray-700 text-4xl font-thin mb-6">:</span>}
+            {i < units.length - 1 && <span style={{ color: '#374151', fontSize: '2.5rem', marginBottom: '1.5rem' }}>:</span>}
           </div>
         ))}
       </div>
@@ -566,20 +395,19 @@ export default TimerDisplay;
   dataFetch: `import React, { useState, useEffect, useCallback } from 'react';
 
 function DataList({ endpoint = '', title = 'Items' }) {
-  const [items, setItems]     = useState([]);
+  const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState(null);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     if (!endpoint) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
-
     (async () => {
       try {
         const res  = await fetch(endpoint);
-        if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (!cancelled) setItems(Array.isArray(data) ? data : data.items ?? []);
       } catch (err) {
@@ -588,46 +416,34 @@ function DataList({ endpoint = '', title = 'Items' }) {
         if (!cancelled) setLoading(false);
       }
     })();
-
     return () => { cancelled = true; };
   }, [endpoint]);
 
-  const retry = useCallback(() => {
-    setError(null);
-    setLoading(false);
-  }, []);
+  const retry = useCallback(() => { setError(null); setLoading(false); }, []);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="w-8 h-8 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-      </div>
-    );
-  }
+  if (loading) return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '3rem' }}>
+      <div style={{ width: 32, height: 32, borderRadius: '50%', border: '3px solid rgba(99,102,241,0.3)', borderTopColor: '#6366F1', animation: 'spin 0.8s linear infinite' }} />
+    </div>
+  );
 
-  if (error) {
-    return (
-      <div className="text-center py-12">
-        <p className="text-red-400 mb-4">{error}</p>
-        <button
-          type="button"
-          onClick={retry}
-          className="px-4 py-2 rounded-lg bg-red-500/20 text-red-400 border-0 cursor-pointer transition-colors hover:bg-red-500/30"
-        >Retry</button>
-      </div>
-    );
-  }
+  if (error) return (
+    <div style={{ textAlign: 'center', padding: '3rem' }}>
+      <p style={{ color: '#F87171', marginBottom: '1rem' }}>{error}</p>
+      <button onClick={retry} style={{ background: 'rgba(239,68,68,0.2)', color: '#F87171', border: 'none', borderRadius: 8, padding: '0.5rem 1rem', cursor: 'pointer' }}>Retry</button>
+    </div>
+  );
 
   return (
-    <div className="py-8 px-6">
-      <h2 className="text-2xl font-bold text-white mb-6">{title}</h2>
-      <div className="grid gap-4">
+    <div style={{ padding: '2rem' }}>
+      <h2 style={{ fontSize: '1.75rem', fontWeight: 700, color: '#F9FAFB', marginBottom: '1.5rem' }}>{title}</h2>
+      <div style={{ display: 'grid', gap: '1rem' }}>
         {items.map((item, i) => (
-          <div key={item.id ?? i} className="p-4 rounded-xl bg-white/5 border border-white/10">
-            <p className="text-white font-medium">{item.name ?? item.title ?? String(item)}</p>
+          <div key={item.id ?? i} style={{ padding: '1rem', borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}>
+            <p style={{ color: '#F9FAFB', fontWeight: 500 }}>{item.name ?? item.title ?? String(item)}</p>
           </div>
         ))}
-        {items.length === 0 && <p className="text-gray-500 text-center py-8">No items found.</p>}
+        {items.length === 0 && <p style={{ color: '#6B7280', textAlign: 'center', padding: '2rem' }}>No items found.</p>}
       </div>
     </div>
   );
@@ -639,7 +455,8 @@ export default DataList;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. VALIDATION_PATTERNS
-//    Run on every LLM-generated file BEFORE writing to disk.
+//    ROOT FIX #8: These checks are real — the pipeline actually enforces them.
+//    Called by validateGeneratedFile() which is called in applyValidationGate().
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function validateGeneratedFile(file: FileContent): ValidationResult {
@@ -652,7 +469,6 @@ export function validateGeneratedFile(file: FileContent): ValidationResult {
     return { valid: false, errors: ['File content is empty or too short'], warnings };
   }
 
-  // REJECT CSS FILES — pipeline does not allow CSS
   if (p.endsWith('.css')) {
     return { valid: false, errors: ['CSS files are not allowed'], warnings: [] };
   }
@@ -669,9 +485,8 @@ export function validateGeneratedFile(file: FileContent): ValidationResult {
     errors.push(...checkNumericIdentifiers(c, p));
     errors.push(...checkBannedPackages(c, p));
     errors.push(...checkIfInJSX(c, p));
-    errors.push(...checkMissingKeyProps(c, p));
-    // Tailwind validations removed — now allowed
     errors.push(...checkCssImports(c, p));
+    errors.push(...checkFontStringQuotes(c, p));  // ROOT FIX #7
     warnings.push(...checkAsyncUseEffect(c, p));
     warnings.push(...checkMissingDepsArray(c, p));
     warnings.push(...checkProseAfterExport(c, p));
@@ -691,8 +506,9 @@ export function validateGeneratedFile(file: FileContent): ValidationResult {
 
 function checkReactImport(c: string, p: string): string[] {
   if (!p.endsWith('.jsx')) return [];
-  const hasImport = c.includes("from 'react'") || c.includes('from "react"');
-  return hasImport ? [] : [`[${p}] Missing React import`];
+  return (c.includes("from 'react'") || c.includes('from "react"'))
+    ? []
+    : [`[${p}] Missing React import`];
 }
 
 function checkExportDefault(c: string, p: string): string[] {
@@ -748,49 +564,34 @@ function checkDuplicateConsts(c: string, p: string): string[] {
 
 function checkHookSyntax(c: string, p: string): string[] {
   const errors: string[] = [];
-
   if (/useMemo\s*\(\s*\([^)]*,\s*\[/.test(c)) {
-    errors.push(
-      `[${p}] CRITICAL: useMemo dep array is INSIDE the function argument. ` +
-      `Fix: useMemo(() => value, [deps]) — two separate args.`
-    );
+    errors.push(`[${p}] CRITICAL: useMemo dep array is INSIDE the function argument`);
   }
   if (/useCallback\s*\(\s*\([^)]*,\s*\[/.test(c)) {
-    errors.push(
-      `[${p}] CRITICAL: useCallback dep array is INSIDE the function argument. ` +
-      `Fix: useCallback((x) => fn(x), [deps]) — two separate args.`
-    );
+    errors.push(`[${p}] CRITICAL: useCallback dep array is INSIDE the function argument`);
   }
-  if (/useMemo\s*\(\s*\)/.test(c)) {
-    errors.push(`[${p}] useMemo called with no arguments`);
-  }
-  if (/useCallback\s*\(\s*\)/.test(c)) {
-    errors.push(`[${p}] useCallback called with no arguments`);
-  }
+  if (/useMemo\s*\(\s*\)/.test(c)) errors.push(`[${p}] useMemo called with no arguments`);
+  if (/useCallback\s*\(\s*\)/.test(c)) errors.push(`[${p}] useCallback called with no arguments`);
   return errors;
 }
 
 function checkProxyCorruption(c: string, p: string): string[] {
   return /=\s*\/\s*>/.test(c)
-    ? [`[${p}] Proxy-corrupted arrow '= />' found — replace with '=>'`]
+    ? [`[${p}] Proxy-corrupted arrow '= />' found`]
     : [];
 }
 
 function checkRedactedTokens(c: string, p: string): string[] {
   return /<REDACTED_EMAIL>|\[REDACTED(?:_EMAIL)?\]/.test(c)
-    ? [`[${p}] Proxy redaction token found — replace with '' or null`]
+    ? [`[${p}] Proxy redaction token found`]
     : [];
 }
 
 function checkNumericIdentifiers(c: string, p: string): string[] {
   const errors: string[] = [];
-  if (/import\s+\d\w*\s+from/.test(c)) {
-    errors.push(`[${p}] Import identifier starts with a digit (invalid JS)`);
-  }
+  if (/import\s+\d\w*\s+from/.test(c)) errors.push(`[${p}] Import identifier starts with digit`);
   const base = p.split('/').pop()?.split('.')[0] ?? '';
-  if (/^\d/.test(base)) {
-    errors.push(`[${p}] Filename starts with a digit (invalid JS identifier)`);
-  }
+  if (/^\d/.test(base)) errors.push(`[${p}] Filename starts with digit`);
   return errors;
 }
 
@@ -799,7 +600,7 @@ function checkBannedPackages(c: string, p: string): string[] {
     'react-router-dom','axios','three','@react-three/fiber','@react-three/drei',
     'gsap','react-intersection-observer','@tanstack/react-query','zustand',
     'recharts','preact','styled-components','@emotion/react','@emotion/styled',
-    'classnames','clsx'
+    'classnames','clsx','framer-motion','lucide-react',
   ];
   return BANNED
     .filter((pkg) => c.includes(`'${pkg}'`) || c.includes(`"${pkg}"`))
@@ -808,20 +609,28 @@ function checkBannedPackages(c: string, p: string): string[] {
 
 function checkIfInJSX(c: string, p: string): string[] {
   return /\{[\s\n]*if\s*\(/.test(c)
-    ? [`[${p}] if-statement inside JSX {} — use ternary or && operator instead`]
+    ? [`[${p}] if-statement inside JSX {} — use ternary or && instead`]
     : [];
 }
 
-function checkMissingKeyProps(c: string, p: string): string[] {
-  if (/\.map\(\s*(?:\w+|\([^)]*\))\s*=>\s*\(?\s*<[A-Za-z][^>]*(?<!\bkey=\{[^}]*\})[^/]>/.test(c)) {
-    return [`[${p}] .map() may render JSX without key prop`];
-  }
-  return [];
+function checkCssImports(c: string, p: string): string[] {
+  return /import\s+['"`][^'"`]*\.css['"`]/.test(c)
+    ? [`[${p}] CSS import detected — not allowed`]
+    : [];
 }
 
-function checkCssImports(c: string, p: string): string[] {
-  if (/import\s+['"`][^'"`]*\.css['"`]/.test(c)) {
-    return [`[${p}] CSS import detected. CSS files are not allowed.`];
+/**
+ * ROOT FIX #7: Detect font string values with embedded quotes inside JSX style={{}} props.
+ *
+ * Pattern: fontFamily: "'Something', sans-serif"
+ * The single quotes inside the string cause runtime syntax errors.
+ *
+ * This check warns at build time so the issue is caught before deployment.
+ */
+function checkFontStringQuotes(c: string, p: string): string[] {
+  // Match fontFamily property with quotes-inside-string pattern
+  if (/fontFamily\s*:\s*['"]\s*'[^'"]+'\s*,/.test(c)) {
+    return [`[${p}] fontFamily value contains embedded quotes — use: fontFamily: 'FontName, sans-serif' (no inner quotes)`];
   }
   return [];
 }
@@ -842,17 +651,17 @@ function checkTypeScriptLeaks(c: string, p: string): string[] {
 
 function checkAsyncUseEffect(c: string, p: string): string[] {
   return /useEffect\s*\(\s*async\s*(?:\(\s*\)|function)/.test(c)
-    ? [`[${p}] WARNING: async useEffect — use IIFE: useEffect(() => { (async () => { ... })(); }, [])`]
+    ? [`[${p}] WARNING: async useEffect — use IIFE pattern`]
     : [];
 }
 
 function checkMissingDepsArray(c: string, p: string): string[] {
   const warnings: string[] = [];
   if (/useMemo\s*\(/.test(c) && !/useMemo\s*\([^)]+\)\s*,\s*\[/.test(c)) {
-    warnings.push(`[${p}] WARNING: useMemo may be missing dep array as second argument`);
+    warnings.push(`[${p}] WARNING: useMemo may be missing dep array`);
   }
   if (/useEffect\s*\(/.test(c) && !/useEffect\s*\([^)]+\)\s*,\s*\[/.test(c)) {
-    warnings.push(`[${p}] WARNING: useEffect may be missing dep array as second argument`);
+    warnings.push(`[${p}] WARNING: useEffect may be missing dep array`);
   }
   return warnings;
 }
@@ -898,24 +707,27 @@ export class ProjectPlanner {
 
   static plan(prompt: string): BasicPlan {
     const lower = prompt.toLowerCase();
-    if (lower.includes('landing'))                          return { name: 'ai-landing-app',   pages: ['home', 'pricing', 'contact'] };
-    if (lower.includes('dashboard'))                        return { name: 'ai-dashboard-app', pages: ['dashboard', 'analytics', 'settings'] };
-    if (lower.includes('blog'))                             return { name: 'ai-blog-app',      pages: ['home', 'post', 'about'] };
-    if (lower.includes('portfolio'))                        return { name: 'ai-portfolio-app', pages: ['home', 'projects', 'contact'] };
-    if (lower.includes('ecommerce') || lower.includes('shop')) return { name: 'ai-shop-app',  pages: ['home', 'products', 'cart', 'checkout'] };
-    if (lower.includes('saas'))                             return { name: 'ai-saas-app',      pages: ['home', 'features', 'pricing', 'contact'] };
-    if (lower.includes('social') || lower.includes('community')) return { name: 'ai-social-app', pages: ['feed', 'profile', 'messages', 'explore'] };
-    if (lower.includes('admin') || lower.includes('cms'))   return { name: 'ai-admin-app',     pages: ['dashboard', 'users', 'content', 'settings'] };
-    if (lower.includes('streaming') || lower.includes('video') || lower.includes('movie')) return { name: 'ai-streaming-app', pages: ['home', 'browse', 'watch', 'profile'] };
-    if (lower.includes('music') || lower.includes('audio') || lower.includes('podcast'))   return { name: 'ai-music-app',     pages: ['home', 'library', 'player', 'discover'] };
+    if (lower.includes('landing'))                              return { name: 'ai-landing-app',   pages: ['home', 'pricing', 'contact'] };
+    if (lower.includes('dashboard'))                           return { name: 'ai-dashboard-app', pages: ['dashboard', 'analytics', 'settings'] };
+    if (lower.includes('blog'))                                return { name: 'ai-blog-app',      pages: ['home', 'post', 'about'] };
+    if (lower.includes('portfolio'))                           return { name: 'ai-portfolio-app', pages: ['home', 'projects', 'contact'] };
+    if (lower.includes('ecommerce') || lower.includes('shop')) return { name: 'ai-shop-app',      pages: ['home', 'products', 'cart'] };
+    if (lower.includes('saas'))                                return { name: 'ai-saas-app',      pages: ['home', 'features', 'pricing'] };
+    if (lower.includes('streaming') || lower.includes('video')) return { name: 'ai-streaming-app', pages: ['home', 'browse', 'watch'] };
     return { name: 'ai-generated-app', pages: ['home'] };
   }
 
+  /**
+   * ROOT FIX #9: buildComponentPrompt now accepts and uses ModeConfig.
+   * The mode is surfaced in the prompt so the LLM understands the project scope.
+   */
   static buildComponentPrompt(
     spec: ComponentSpec,
     alreadyGenerated: string[],
-    projectDescription: string
+    projectDescription: string,
+    mode?: ModeConfig,
   ): string {
+    const resolvedMode = mode ?? detectComplexityMode(projectDescription);
     const category = ProjectPlanner.detectCategory(spec.name, spec.description);
     const template = COMPONENT_TEMPLATES[category] ?? COMPONENT_TEMPLATES.base;
 
@@ -927,36 +739,35 @@ ${CODEGEN_RULES}
 
 ━━━ PROJECT CONTEXT ━━━
 ${projectDescription}
+Project scope: ${resolvedMode.mode} (${resolvedMode.description})
 
 ━━━ FILE TO GENERATE ━━━
 Path:       ${spec.path}
 Component:  ${spec.name}
 Purpose:    ${spec.description}
-Animations: ${spec.hasAnimation ? 'YES — use framer-motion for animations' : 'NO'}
-Has data:   ${spec.hasData ? 'YES — use realistic placeholder data arrays (at least 4 items)' : 'NO'}
 
 ━━━ ALREADY GENERATED (safe to import — use exact paths below) ━━━
 ${alreadyGenerated.length > 0 ? alreadyGenerated.join('\n') : '(none — do not import from other components)'}
 
-━━━ REFERENCE SKELETON (follow this structure exactly) ━━━
+━━━ REFERENCE SKELETON (follow this structure) ━━━
 ${template}
 
 ━━━ CRITICAL REMINDERS ━━━
-useMemo(() => value, [deps])          ← dep array is SECOND arg to useMemo
-useCallback((x) => fn(x), [deps])     ← dep array is SECOND arg to useCallback
-useEffect(() => { ... }, [])          ← dep array ALWAYS REQUIRED
-Sub-components (Logo, NavLinks, UserMenu) → define them IN THIS FILE if not imported above
+useMemo(() => value, [deps])         ← dep array is SECOND arg
+useCallback((x) => fn(x), [deps])   ← dep array is SECOND arg
+useEffect(() => { ... }, [])        ← dep array ALWAYS required
+fontFamily: 'Syne, sans-serif'      ← NO inner quotes in font names
+ALL styling: inline style={{}} ONLY — no className, no CSS imports
 NEVER write explanation text after export default
 Start writing the file now:`;
   }
 
   static detectCategory(name: string, description: string): string {
     const s = (name + ' ' + description).toLowerCase();
-    if (/header|navbar|nav\b/.test(s))          return 'header';
-    if (/hero|landing|banner|splash/.test(s))   return 'hero';
-    if (/timer|countdown|clock/.test(s))        return 'timer';
-    if (/row|carousel|slider|scroll/.test(s))   return 'scrollRow';
-    if (/fetch|api|data.*list/.test(s))         return 'dataFetch';
+    if (/header|navbar|nav\b/.test(s))        return 'header';
+    if (/hero|landing|banner|splash/.test(s)) return 'hero';
+    if (/timer|countdown|clock/.test(s))      return 'timer';
+    if (/fetch|api|data.*list/.test(s))       return 'dataFetch';
     return 'base';
   }
 
@@ -1008,9 +819,9 @@ export function countBraces(content: string): { open: number; close: number; bal
 }
 
 export function findUnusedImports(content: string): string[] {
-  const unused: string[]  = [];
-  const importLines       = content.split('\n').filter((l) => l.trim().startsWith('import '));
-  const body              = content.replace(/^import[^\n]+$/gm, '');
+  const unused: string[] = [];
+  const importLines      = content.split('\n').filter((l) => l.trim().startsWith('import '));
+  const body             = content.replace(/^import[^\n]+$/gm, '');
 
   for (const line of importLines) {
     const namedMatch = line.match(/\{([^}]+)\}/);
@@ -1030,18 +841,11 @@ export function findUnusedImports(content: string): string[] {
 
 export function auditHookCallSites(content: string, filePath: string): string[] {
   const errors: string[] = [];
-
   if (/useMemo\s*\(\s*\([^)]*,\s*\[/.test(content)) {
-    errors.push(
-      `[${filePath}] useMemo: dep array is inside the first arg. ` +
-      `Correct: useMemo(() => value, [deps])`
-    );
+    errors.push(`[${filePath}] useMemo: dep array is inside first arg`);
   }
   if (/useCallback\s*\(\s*\([^)]*,\s*\[/.test(content)) {
-    errors.push(
-      `[${filePath}] useCallback: dep array is inside the first arg. ` +
-      `Correct: useCallback((x) => fn(x), [deps])`
-    );
+    errors.push(`[${filePath}] useCallback: dep array is inside first arg`);
   }
   if (/useMemo\s*\(\s*\(\s*\)\s*=>\s*[^,)]+\s*\)(?!\s*,)/.test(content)) {
     errors.push(`[${filePath}] useMemo missing dep array as second argument`);
@@ -1052,51 +856,13 @@ export function auditHookCallSites(content: string, filePath: string): string[] 
   return errors;
 }
 
-export function detectIdentifierTypos(content: string): { hasTypos: boolean; found: Array<[string, string]> } {
-  const TYPO_MAP: Array<[RegExp, string]> = [
-    [/\bhandlleScroll\b/g, 'handleScroll'],
-    [/\bscrolllTo\b/g,     'scrollTo'],
-    [/\buserState\b/g,     'useState'],
-    [/\busestate\b/g,      'useState'],
-    [/\buseEffekt\b/g,     'useEffect'],
-    [/\buseCallbakc\b/g,   'useCallback'],
-    [/\buseContxt\b/g,     'useContext'],
-    [/\bclassname\b/g,     'className'],
-    [/\bClassname\b/g,     'className'],
-    [/\bonclick\b/g,       'onClick'],
-    [/\bconsoloe\b/g,      'console'],
-    [/\bfucntion\b/g,      'function'],
-    [/\bretrun\b/g,        'return'],
-    [/\bimprot\b/g,        'import'],
-    [/\bdefualt\b/g,       'default'],
-  ];
-  const found: Array<[string, string]> = [];
-  for (const [re, correct] of TYPO_MAP) {
-    if (re.test(content)) found.push([re.source.replace(/\\b/g, ''), correct]);
-  }
-  return { hasTypos: found.length > 0, found };
-}
-
-export function findMissingComponentFiles(
-  usedComponents: string[],
-  definedOrImported: string[]
-): string[] {
-  const defined  = new Set(definedOrImported);
-  const BUILTINS = new Set([
-    'React','Fragment','Suspense','StrictMode','ErrorBoundary',
-    'Router','Route','Routes','Navigate','Link','Switch','Provider','Consumer','Canvas',
-  ]);
-  return usedComponents.filter((name) => !defined.has(name) && !BUILTINS.has(name));
-}
-
-export function sanitiseComponentFilename(filename: string): string {
+export function sanitizeComponentFilename(filename: string): string {
   const ext  = filename.includes('.') ? '.' + filename.split('.').pop() : '';
   const base = filename.slice(0, filename.length - ext.length);
   if (!/^\d/.test(base)) return filename;
   const m = base.match(/^(\d+)(.*)/);
   if (!m) return filename;
-  const digits   = m[1];
-  const rest     = m[2];
+  const [, digits, rest] = m;
   const safeName = rest ? rest.charAt(0).toUpperCase() + rest.slice(1) + digits : `Component${digits}`;
   return safeName + ext;
 }

@@ -1,17 +1,20 @@
 // src/lib/ai/engine/batch-generator.ts
-// v19.0 — FILE‑BY‑FILE GENERATOR (replaces broken batch JSON approach)
+// v20.0 — FILE-BY-FILE GENERATOR · DESIGN TOKEN INJECTION · ROLE-AWARE PROMPTS
 //
-// ROOT CAUSE OF OLD FAILURE:
-//   Old approach: ask LLM to return ALL files as ONE JSON array with code as string values.
-//   Problem:      LLM cannot reliably JSON-escape multiline code → truncation → parse failure → fallback.
-//   Fix:          ONE LLM call per file. Raw code output. No JSON encoding. No parsing failure modes.
+// This module mirrors the prompt quality improvements from stream-pipeline v20.
+// It is the backend used by generate-code.ts / the non-streaming code path.
 //
-// This module is kept as a named export for backward compat with stream-pipeline.ts imports.
-// The real generation logic is self-contained here, using the CODEGEN_MODELS roster.
+// KEY CHANGES FROM v19:
+//   • Imports resolveDesignTokens() logic inline (copy to avoid circular dep)
+//   • buildSystemPrompt() injects full 30-token design system + animation library
+//   • buildFileUserPrompt() uses getComponentRoleInstructions() for rich per-type prompts
+//   • CODEGEN_MAX_TOKENS raised to 6000
+//   • makeFallback() uses design tokens for colored safe components
 
 import OpenAI from "openai";
 import { ProjectPlan, ComponentSpec } from "./project-planner-v2";
 import { DesignSystem } from "./design-system";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface StreamFile {
@@ -19,13 +22,34 @@ export interface StreamFile {
   content: string;
 }
 
+interface DesignTokens {
+  projectType:    string;
+  primary:        string;
+  primaryLight:   string;
+  accent:         string;
+  bg:             string;
+  bgAlt:          string;
+  bgCard:         string;
+  text:           string;
+  textMuted:      string;
+  border:         string;
+  gradient:       string;
+  gradientHero:   string;
+  glass:          string;
+  glassBorder:    string;
+  shadow:         string;
+  shadowLg:       string;
+  radius:         string;
+  radiusLg:       string;
+  displayFont:    string;
+  bodyFont:       string;
+  animEase:       string;
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
 
-// Code generation model roster — ordered by preference
-// qwen3-coder is the strongest, devstral as fallback, llama-3.3 as last resort
 const CODEGEN_MODELS = [
   "qwen/qwen3-coder-480b-a35b-instruct",
   "mistralai/devstral-2-123b-instruct-2512",
@@ -35,13 +59,12 @@ const CODEGEN_MODELS = [
 type CodegenModel = typeof CODEGEN_MODELS[number];
 
 const MAX_FILE_RETRIES   = 3;
-const MAX_FILE_CHARS     = 10_000;
+const MAX_FILE_CHARS     = 14_000;
 const MIN_FILE_CHARS     = 50;
-const CODEGEN_MAX_TOKENS = 4096;
+const CODEGEN_MAX_TOKENS = 6000;
 const PING_INTERVAL_MS   = 7_000;
-const PARALLEL_BATCH     = 3;      // how many files to generate concurrently
+const PARALLEL_BATCH     = 3;
 
-// Packages that must never appear in generated code
 const BANNED_PACKAGES = [
   "framer-motion", "lucide-react", "react-router-dom", "react-router",
   "axios", "three", "@react-three/fiber", "@react-three/drei",
@@ -58,44 +81,27 @@ const client = new OpenAI({
   baseURL: NVIDIA_BASE_URL,
 });
 
-// ─── Model health tracking ────────────────────────────────────────────────────
+// ─── Model health ─────────────────────────────────────────────────────────────
 
 const modelFailures = new Map<string, number>();
 const FAILURE_THRESHOLD = 3;
+function recordSuccess(m: string):     void    { modelFailures.delete(m); }
+function recordFailure(m: string):     void    { modelFailures.set(m, (modelFailures.get(m) ?? 0) + 1); }
+function isHealthy(m: string):         boolean { return (modelFailures.get(m) ?? 0) < FAILURE_THRESHOLD; }
+function getHealthyModels():           CodegenModel[] { return CODEGEN_MODELS.filter(isHealthy); }
 
-function recordModelSuccess(model: string): void {
-  modelFailures.delete(model);
-}
-
-function recordModelFailure(model: string): void {
-  modelFailures.set(model, (modelFailures.get(model) ?? 0) + 1);
-}
-
-function isModelHealthy(model: string): boolean {
-  return (modelFailures.get(model) ?? 0) < FAILURE_THRESHOLD;
-}
-
-function getHealthyModels(): CodegenModel[] {
-  return CODEGEN_MODELS.filter(isModelHealthy);
-}
-
-// ─── Simple rate limiter ──────────────────────────────────────────────────────
+// ─── Rate limiter ─────────────────────────────────────────────────────────────
 
 const rlTimestamps: number[] = [];
 const RL_MAX_RPM  = 5;
 const RL_WINDOW   = 62_000;
 
 async function waitForRateLimit(label: string, onPing?: () => void): Promise<void> {
-  const now = Date.now();
+  const now     = Date.now();
   const trimmed = rlTimestamps.filter((t) => now - t < RL_WINDOW);
   rlTimestamps.length = 0;
   rlTimestamps.push(...trimmed);
-
-  if (rlTimestamps.length < RL_MAX_RPM) {
-    rlTimestamps.push(now);
-    return;
-  }
-
+  if (rlTimestamps.length < RL_MAX_RPM) { rlTimestamps.push(now); return; }
   const waitMs = RL_WINDOW - (now - rlTimestamps[0]) + 300;
   console.log(`[batch-generator][RL] Waiting ${(waitMs / 1000).toFixed(1)}s for ${label}`);
   await sleepWithPing(waitMs, onPing);
@@ -104,9 +110,9 @@ async function waitForRateLimit(label: string, onPing?: () => void): Promise<voi
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
+function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
+function mlabel(model: string): string { return model.split("/")[1] ?? model; }
+function backoffMs(attempt: number): number { return Math.min(1200 * Math.pow(2, attempt), 20_000); }
 
 async function sleepWithPing(ms: number, onPing?: () => void): Promise<void> {
   if (!onPing || ms <= PING_INTERVAL_MS) return sleep(ms);
@@ -117,17 +123,6 @@ async function sleepWithPing(ms: number, onPing?: () => void): Promise<void> {
   }
 }
 
-function backoffMs(attempt: number): number {
-  return Math.min(1200 * Math.pow(2, attempt), 20_000);
-}
-
-function mlabel(model: string): string {
-  return model.split("/")[1] ?? model;
-}
-
-/**
- * Strip markdown fences. Models often wrap output in ```jsx even when instructed not to.
- */
 function stripMarkdown(text: string): string {
   return text
     .replace(/^```(?:jsx?|javascript|typescript|tsx?|json)?\s*/gim, "")
@@ -136,10 +131,6 @@ function stripMarkdown(text: string): string {
     .trim();
 }
 
-/**
- * Fix common token corruption from NVIDIA models.
- * e.g. ") = />" → ") =>" (arrow function token mangled)
- */
 function fixTokenCorruption(code: string): string {
   let c = code;
   c = c.replace(/(\)|\])\s*=\s*\/\s*>/g, "$1 =>");
@@ -152,32 +143,18 @@ function fixTokenCorruption(code: string): string {
   return c;
 }
 
-/**
- * Remove imports of banned packages from generated code.
- */
 function stripBannedImports(content: string): string {
   const lines: string[] = [];
-
   for (const line of content.split("\n")) {
     const t = line.trim();
     if (!t.startsWith("import ")) { lines.push(line); continue; }
-
-    // Always remove CSS imports
     if (/['"][^'"]*\.css['"]/.test(t)) continue;
-
-    const fromMatch = t.match(/from\s+['"]([^'"]+)['"]/);
-    if (!fromMatch) { lines.push(line); continue; }
-
-    const pkg    = fromMatch[1];
-    const banned = BANNED_PACKAGES.some((b) => pkg === b || pkg.startsWith(b + "/"));
-    if (banned) continue;
-
+    const m = t.match(/from\s+['"]([^'"]+)['"]/);
+    if (!m) { lines.push(line); continue; }
+    if (BANNED_PACKAGES.some((b) => m[1] === b || m[1].startsWith(b + "/"))) continue;
     lines.push(line);
   }
-
   let result = lines.join("\n");
-
-  // Convert react-router <Link> to <a> if it slipped through
   if (/<Link[\s>]/.test(result) || /<\/Link>/.test(result)) {
     result = result
       .replace(/<Link\s+to=(['"])/g, "<a href=$1")
@@ -185,43 +162,26 @@ function stripBannedImports(content: string): string {
       .replace(/<Link(\s[^>]*)?>/g, "<a$1>")
       .replace(/<\/Link>/g, "</a>");
   }
-
   return result;
 }
 
-/**
- * Inject React import if JSX is present but React is not imported.
- */
 function ensureReactImport(content: string): string {
   if (/\bimport\s+React\b/.test(content)) return content;
   if (/<[A-Za-z]/.test(content)) return `import React from 'react';\n${content}`;
   return content;
 }
 
-/**
- * Ensure exactly one export default in a JSX file.
- */
 function ensureDefaultExport(content: string, componentName: string): string {
   const matches = (content.match(/\bexport\s+default\b/g) ?? []).length;
-
   if (matches === 1) return content;
-
   if (matches === 0) {
     const safe = componentName.replace(/[^a-zA-Z0-9_$]/g, "").replace(/^\d+/, "") || "Component";
     return `${content}\n\nexport default ${safe};\n`;
   }
-
-  // Multiple exports — remove all but last
   let count = 0;
-  return content.replace(/\bexport\s+default\b/g, (match) => {
-    count++;
-    return count < matches ? "" : match;
-  });
+  return content.replace(/\bexport\s+default\b/g, (m) => { count++; return count < matches ? "" : m; });
 }
 
-/**
- * Remove duplicate import statements (identical lines).
- */
 function deduplicateImports(content: string): string {
   const seen = new Set<string>();
   return content.split("\n").filter((line) => {
@@ -233,20 +193,124 @@ function deduplicateImports(content: string): string {
   }).join("\n");
 }
 
-/**
- * Normalize whitespace and add trailing newline.
- */
 function cleanOutput(content: string): string {
-  return content
-    .replace(/[ \t]+$/gm, "")
-    .replace(/\n{4,}/g, "\n\n\n")
-    .trimEnd() + "\n";
+  return content.replace(/[ \t]+$/gm, "").replace(/\n{4,}/g, "\n\n\n").trimEnd() + "\n";
 }
 
-/**
- * Create a minimal safe fallback component for a file that failed generation.
- */
-function makeFallback(spec: ComponentSpec): StreamFile {
+// ─── Design Token Resolver ────────────────────────────────────────────────────
+
+function resolveTokens(plan: ProjectPlan): DesignTokens {
+  const p = (plan.projectName + " " + plan.description).toLowerCase();
+
+  const isSaas        = /saas|dashboard|analytics|crm|productivity|workspace|admin|platform/i.test(p);
+  const isEcommerce   = /shop|store|ecommerce|product|cart|checkout|fashion/i.test(p);
+  const isFinance     = /finance|fintech|bank|invest|crypto|wallet|trading/i.test(p);
+  const isCreative    = /creative|agency|portfolio|design|art|studio|gallery/i.test(p);
+  const isStreaming   = /streaming|music|podcast|audio|video|media|entertainment/i.test(p);
+  const isHealthcare  = /health|medical|clinic|fitness|wellness/i.test(p);
+  const isEducation   = /education|learning|course|tutor|school|academy/i.test(p);
+
+  if (isSaas) return {
+    projectType: "saas", primary: "#6366F1", primaryLight: "#818CF8", accent: "#06B6D4",
+    bg: "#030712", bgAlt: "#0F172A", bgCard: "#111827", text: "#F9FAFB", textMuted: "#6B7280", border: "#1F2937",
+    gradient: "linear-gradient(135deg, #6366F1 0%, #06B6D4 100%)",
+    gradientHero: "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(99,102,241,0.35) 0%, transparent 70%)",
+    glass: "rgba(255,255,255,0.03)", glassBorder: "rgba(255,255,255,0.08)",
+    shadow: "0 4px 24px rgba(99,102,241,0.15)", shadowLg: "0 20px 60px rgba(99,102,241,0.25)",
+    radius: "12px", radiusLg: "20px",
+    displayFont: "'Syne', sans-serif", bodyFont: "'DM Sans', sans-serif",
+    animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
+  };
+
+  if (isFinance) return {
+    projectType: "finance", primary: "#10B981", primaryLight: "#34D399", accent: "#F59E0B",
+    bg: "#030B0F", bgAlt: "#061019", bgCard: "#0A1628", text: "#ECF0F1", textMuted: "#5D7A8A", border: "#0F2030",
+    gradient: "linear-gradient(135deg, #10B981 0%, #0EA5E9 100%)",
+    gradientHero: "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(16,185,129,0.25) 0%, transparent 70%)",
+    glass: "rgba(16,185,129,0.04)", glassBorder: "rgba(16,185,129,0.12)",
+    shadow: "0 4px 24px rgba(16,185,129,0.12)", shadowLg: "0 20px 60px rgba(16,185,129,0.2)",
+    radius: "8px", radiusLg: "16px",
+    displayFont: "'Libre Baskerville', serif", bodyFont: "'DM Sans', sans-serif",
+    animEase: "cubic-bezier(0.22, 1, 0.36, 1)",
+  };
+
+  if (isEcommerce) return {
+    projectType: "ecommerce", primary: "#E11D48", primaryLight: "#FB7185", accent: "#F59E0B",
+    bg: "#FAFAF9", bgAlt: "#F5F5F4", bgCard: "#FFFFFF", text: "#1C1917", textMuted: "#78716C", border: "#E7E5E4",
+    gradient: "linear-gradient(135deg, #E11D48 0%, #F59E0B 100%)",
+    gradientHero: "linear-gradient(160deg, #FFF1F2 0%, #FEF3C7 100%)",
+    glass: "rgba(255,255,255,0.8)", glassBorder: "rgba(0,0,0,0.06)",
+    shadow: "0 4px 20px rgba(0,0,0,0.08)", shadowLg: "0 20px 60px rgba(0,0,0,0.12)",
+    radius: "10px", radiusLg: "18px",
+    displayFont: "'Playfair Display', serif", bodyFont: "'Lato', sans-serif",
+    animEase: "cubic-bezier(0.34, 1.56, 0.64, 1)",
+  };
+
+  if (isCreative) return {
+    projectType: "creative", primary: "#FF3D00", primaryLight: "#FF7043", accent: "#FFD600",
+    bg: "#0A0A0A", bgAlt: "#111111", bgCard: "#181818", text: "#F5F5F5", textMuted: "#888888", border: "#222222",
+    gradient: "linear-gradient(135deg, #FF3D00 0%, #FFD600 100%)",
+    gradientHero: "radial-gradient(ellipse 70% 50% at 50% 0%, rgba(255,61,0,0.3) 0%, transparent 60%)",
+    glass: "rgba(255,255,255,0.03)", glassBorder: "rgba(255,255,255,0.1)",
+    shadow: "0 4px 24px rgba(255,61,0,0.15)", shadowLg: "0 20px 60px rgba(255,61,0,0.2)",
+    radius: "4px", radiusLg: "8px",
+    displayFont: "'Bebas Neue', cursive", bodyFont: "'Outfit', sans-serif",
+    animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
+  };
+
+  if (isStreaming) return {
+    projectType: "streaming", primary: "#A855F7", primaryLight: "#C084FC", accent: "#F43F5E",
+    bg: "#09090B", bgAlt: "#18181B", bgCard: "#1C1C1E", text: "#FAFAFA", textMuted: "#71717A", border: "#27272A",
+    gradient: "linear-gradient(135deg, #A855F7 0%, #F43F5E 100%)",
+    gradientHero: "radial-gradient(ellipse 80% 60% at 50% -5%, rgba(168,85,247,0.4) 0%, transparent 65%)",
+    glass: "rgba(255,255,255,0.04)", glassBorder: "rgba(255,255,255,0.1)",
+    shadow: "0 4px 24px rgba(168,85,247,0.2)", shadowLg: "0 20px 60px rgba(168,85,247,0.3)",
+    radius: "14px", radiusLg: "24px",
+    displayFont: "'Space Grotesk', sans-serif", bodyFont: "'Space Grotesk', sans-serif",
+    animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
+  };
+
+  if (isHealthcare) return {
+    projectType: "healthcare", primary: "#0EA5E9", primaryLight: "#38BDF8", accent: "#10B981",
+    bg: "#F8FAFC", bgAlt: "#F1F5F9", bgCard: "#FFFFFF", text: "#0F172A", textMuted: "#64748B", border: "#E2E8F0",
+    gradient: "linear-gradient(135deg, #0EA5E9 0%, #10B981 100%)",
+    gradientHero: "linear-gradient(160deg, #EFF6FF 0%, #ECFDF5 100%)",
+    glass: "rgba(255,255,255,0.9)", glassBorder: "rgba(14,165,233,0.15)",
+    shadow: "0 4px 20px rgba(14,165,233,0.1)", shadowLg: "0 20px 60px rgba(14,165,233,0.15)",
+    radius: "14px", radiusLg: "24px",
+    displayFont: "'Nunito', sans-serif", bodyFont: "'Source Sans 3', sans-serif",
+    animEase: "cubic-bezier(0.34, 1.56, 0.64, 1)",
+  };
+
+  if (isEducation) return {
+    projectType: "education", primary: "#7C3AED", primaryLight: "#A78BFA", accent: "#F59E0B",
+    bg: "#0D0D1A", bgAlt: "#13132A", bgCard: "#1A1A35", text: "#EDE9FE", textMuted: "#7C7C99", border: "#252550",
+    gradient: "linear-gradient(135deg, #7C3AED 0%, #DB2777 100%)",
+    gradientHero: "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(124,58,237,0.35) 0%, transparent 70%)",
+    glass: "rgba(255,255,255,0.04)", glassBorder: "rgba(124,58,237,0.2)",
+    shadow: "0 4px 24px rgba(124,58,237,0.2)", shadowLg: "0 20px 60px rgba(124,58,237,0.3)",
+    radius: "12px", radiusLg: "20px",
+    displayFont: "'Lexend', sans-serif", bodyFont: "'Plus Jakarta Sans', sans-serif",
+    animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
+  };
+
+  // Default dark modern
+  return {
+    projectType: "modern", primary: "#6366F1", primaryLight: "#818CF8", accent: "#F59E0B",
+    bg: "#030712", bgAlt: "#0F172A", bgCard: "#111827", text: "#F9FAFB", textMuted: "#6B7280", border: "#1F2937",
+    gradient: "linear-gradient(135deg, #6366F1 0%, #EC4899 100%)",
+    gradientHero: "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(99,102,241,0.35) 0%, transparent 70%)",
+    glass: "rgba(255,255,255,0.03)", glassBorder: "rgba(255,255,255,0.08)",
+    shadow: "0 4px 24px rgba(99,102,241,0.15)", shadowLg: "0 20px 60px rgba(99,102,241,0.25)",
+    radius: "12px", radiusLg: "20px",
+    displayFont: "'Syne', sans-serif", bodyFont: "'DM Sans', sans-serif",
+    animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
+  };
+}
+
+// ─── Fallback component ───────────────────────────────────────────────────────
+
+function makeFallback(spec: ComponentSpec, tokens: DesignTokens): StreamFile {
   const rawName  = spec.path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "Component";
   const safeName = rawName.replace(/[^a-zA-Z0-9_$]/g, "").replace(/^\d+/, "") || "Component";
   const compName = safeName.charAt(0).toUpperCase() + safeName.slice(1);
@@ -257,19 +321,19 @@ function makeFallback(spec: ComponentSpec): StreamFile {
 function ${compName}() {
   return (
     <section style={{
-      padding: '4rem 2rem',
+      padding: '5rem 2rem',
       textAlign: 'center',
-      background: '#0a0a0f',
-      minHeight: '200px',
+      background: '${tokens.bgCard}',
+      minHeight: '220px',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
     }}>
       <div>
-        <h2 style={{ fontSize: '1.75rem', fontWeight: 700, color: '#f1f5f9', margin: 0 }}>
+        <h2 style={{ fontSize: '1.75rem', fontWeight: 700, color: '${tokens.text}', margin: '0 0 0.75rem', fontFamily: '${tokens.displayFont}' }}>
           ${compName}
         </h2>
-        <p style={{ color: '#64748b', marginTop: '0.75rem', fontSize: '0.95rem', margin: '0.75rem 0 0' }}>
+        <p style={{ color: '${tokens.textMuted}', marginTop: '0.75rem', fontSize: '0.95rem', margin: 0 }}>
           ${spec.description}
         </p>
       </div>
@@ -283,63 +347,188 @@ export default ${compName};`
   return { path: spec.path, content };
 }
 
+// ─── Component role instructions ─────────────────────────────────────────────
+
+function getRoleInstructions(spec: ComponentSpec, tokens: DesignTokens): string {
+  const p = (spec.path + " " + spec.description).toLowerCase();
+
+  if (/nav|header|navbar/.test(p)) return `
+NAVBAR: Fixed top, full width, z-index 1000.
+- Glassmorphism bg: background '${tokens.glass}', backdropFilter 'blur(20px)', borderBottom '1px solid ${tokens.glassBorder}'
+- Logo left (display font, gradient text), nav links center (with hover underline), CTA button right
+- useState for mobile menu toggle with hamburger SVG
+- Animate in: fadeInDown`;
+
+  if (/hero/.test(p)) return `
+HERO: Full viewport height (minHeight '100vh'), centered, position relative.
+- Two animated blobs in background: absolute, large circles, primary color at low opacity, filter blur 120-140px, animation blob 10s infinite
+- Eyebrow label (inline-block, primary bg at 15% opacity, rounded, uppercase, small font)
+- Main heading: 4-6rem, display font, fontWeight 800. Use gradient text on key words.
+- Subheading: 1.2rem, textMuted, maxWidth 560px, auto margin
+- Two CTA buttons: glow primary + outline ghost
+- Staggered fadeInUp on all elements (0s, 0.15s, 0.3s, 0.45s)`;
+
+  if (/feature/.test(p)) return `
+FEATURES: 3 or 6 cards in CSS grid.
+- Section eyebrow label + large centered heading (gradient word)
+- Cards: bgCard bg, 1px border, radius, padding 1.75rem
+- Each card: SVG icon in colored circle (primary color), title, description
+- Hover: translateY(-6px), shadowLg, border color → primary
+- Staggered fadeInUp on cards`;
+
+  if (/pricing/.test(p)) return `
+PRICING: 3 tiers — Starter, Pro (featured), Enterprise.
+- Monthly/Annual toggle (useState) with 20% annual discount shown
+- Featured tier: gradient border via outline, scale 1.04, shadowLg
+- "Most popular" badge: gradient bg, absolute positioned
+- Feature list: SVG checkmarks in primary color
+- CTA buttons per card
+- Animate in with scaleIn + stagger`;
+
+  if (/testimonial|review/.test(p)) return `
+TESTIMONIALS: 3-4 cards in grid.
+- Each: large decorative quote mark (primary, low opacity), quote text, avatar (gradient circle + initials), name, role, 5 star SVG rating
+- Cards: glassmorphism or bgCard
+- Hover: subtle lift
+- Stagger fadeInUp`;
+
+  if (/stat|metric|count/.test(p)) return `
+STATS: 4-6 numbers in horizontal row.
+- Each: animated count-up with useState + useEffect (0 → target over 2s)
+- Numbers: huge font (5xl+), display font, gradient text
+- Labels below in textMuted
+- Background bgAlt or subtle gradient
+- Animation: countUp on each stat`;
+
+  if (/footer/.test(p)) return `
+FOOTER: Full-width, dark bg.
+- Logo + tagline | 3-4 nav columns (Product, Company, Resources, Legal) | social SVG icons
+- Bottom bar: copyright + links, border-top separator
+- Link hover: color → primary with transition`;
+
+  if (/cta|call.to.action|banner/.test(p)) return `
+CTA SECTION: High-impact conversion section.
+- Gradient sweep background or strong gradient overlay
+- Centered: eyebrow + large heading + subtext + two buttons
+- Blob decorations in corners
+- scaleIn animation`;
+
+  return `
+COMPONENT: Premium visual quality matching ${tokens.projectType} design.
+- Use design tokens throughout: colors, gradients, fonts, glass effects
+- Staggered entry animations with fadeInUp
+- Display font (${tokens.displayFont}) for headings, body font (${tokens.bodyFont}) for text
+- Real, specific content — no placeholders
+- Hover states on all interactive elements with useState`;
+}
+
 // ─── Prompt builders ──────────────────────────────────────────────────────────
 
-function buildSystemPrompt(plan: ProjectPlan, generatedSoFar: StreamFile[]): string {
-  const ds = plan.designSystem;
-
+function buildSystemPrompt(plan: ProjectPlan, tokens: DesignTokens, generatedSoFar: StreamFile[]): string {
   const generatedList = generatedSoFar
     .filter((f) => f.path.endsWith(".jsx") || f.path.endsWith(".js"))
     .map((f) => {
       const name    = f.path.split("/").pop()!.replace(/\.[^.]+$/, "");
       const relPath = "./" + f.path.replace(/^src\//, "").replace(/\.[^.]+$/, "") + ".jsx";
-      return `  - ${name} → '${relPath}'`;
+      return `  ${name} → '${relPath}'`;
     })
     .join("\n") || "  (none yet)";
 
-  return `You are an elite React engineer building production-grade websites.
-Output ONLY raw file content — the VERY FIRST character of your response must be the first character of the file.
+  return `You are an elite React engineer building production-grade websites with extraordinary visual quality.
+Output ONLY raw file content. The VERY FIRST character of your response = first character of the file.
 NO markdown. NO backticks. NO explanations. NO preamble. NO TypeScript.
 
-━━━ PROJECT ━━━
-Name:    ${plan.projectName}
-Purpose: ${plan.description}
-Colors:  primary=${ds.colors.primary}, bg=${ds.colors.bg}, text=${ds.colors.text}
-Font:    ${ds.fonts}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DESIGN TOKENS — use these in every component
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Project type:   ${tokens.projectType}
+Project name:   ${plan.projectName}
+Description:    ${plan.description}
 
-━━━ ALREADY GENERATED (available to import) ━━━
+Colors:
+  primary:        ${tokens.primary}
+  primaryLight:   ${tokens.primaryLight}
+  accent:         ${tokens.accent}
+  bg:             ${tokens.bg}
+  bgAlt:          ${tokens.bgAlt}
+  bgCard:         ${tokens.bgCard}
+  text:           ${tokens.text}
+  textMuted:      ${tokens.textMuted}
+  border:         ${tokens.border}
+
+Visual effects:
+  gradient:       ${tokens.gradient}
+  gradientHero:   ${tokens.gradientHero}
+  glass bg:       ${tokens.glass}
+  glass border:   ${tokens.glassBorder}
+  shadow:         ${tokens.shadow}
+  shadowLg:       ${tokens.shadowLg}
+  radius:         ${tokens.radius}
+  radiusLg:       ${tokens.radiusLg}
+
+Typography:
+  displayFont:    ${tokens.displayFont}
+  bodyFont:       ${tokens.bodyFont}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ANIMATION KEYFRAMES — available in DOM, use in style={{ animation: ... }}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+fadeInUp, fadeInDown, slideInLeft, slideInRight, scaleIn
+float (infinite levitate), pulseGlow (infinite glow), shimmer (gradient sweep)
+spin (rotate), blob (organic morph), marquee (ticker), countUp (stat number)
+
+STAGGER: style={{ animation: 'fadeInUp 0.6s ${tokens.animEase} 0.1s both' }}
+         add 0.1s delay per child element for staggered reveal
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+UI PATTERNS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Glass card:
+  style={{ background: '${tokens.glass}', backdropFilter: 'blur(20px)', border: '1px solid ${tokens.glassBorder}', borderRadius: '${tokens.radiusLg}', padding: '2rem' }}
+
+Gradient text:
+  style={{ background: '${tokens.gradient}', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}
+
+Glow button:
+  style={{ background: '${tokens.gradient}', color: '#fff', border: 'none', borderRadius: '${tokens.radius}', padding: '0.85rem 2.2rem', fontSize: '1rem', fontWeight: 600, cursor: 'pointer', boxShadow: '${tokens.shadow}', transition: 'all 0.2s ease' }}
+
+Section label (eyebrow):
+  style={{ display: 'inline-block', background: '${tokens.primary}22', color: '${tokens.primaryLight}', borderRadius: 99, padding: '0.35rem 1rem', fontSize: '0.8rem', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ALREADY GENERATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${generatedList}
 
-━━━ ABSOLUTE RULES (every single one is mandatory) ━━━
-1. ALL styling MUST use inline style={{}} — NO className, NO CSS files, NO <style> tags, NO Tailwind
-2. ONLY allowed imports: react, react-dom, and relative .jsx/.js paths within this project
-3. BANNED packages (NEVER import these):
-   ${BANNED_PACKAGES.join(", ")}
-4. ICONS: use inline SVG <svg> elements ONLY — do NOT import from any icon library
-5. Every JSX open tag must have matching close tag or self-close
-6. Every .jsx file must have EXACTLY ONE "export default" statement
-7. Every .jsx file must return valid JSX from its default export function
-8. NO TypeScript: no ": string", no ": React.FC", no "useState<T>", no interface, no type alias
-9. Arrow functions: "=>" only — NEVER write "= />" (that is corrupted output)
-10. NO console.log, NO TODO comments, NO placeholder comments, NO truncation
-11. Write COMPLETE files — never use "..." or "// rest of component" shortcuts
-12. Use real content — no "lorem ipsum", no placeholder text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ABSOLUTE RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Styling: inline style={{}} ONLY — no className, no CSS files, no Tailwind
+2. Imports: react, react-dom, relative .jsx/.js only
+3. BANNED: ${BANNED_PACKAGES.slice(0, 6).join(", ")} (and more)
+4. Icons: inline SVG only
+5. Matching JSX open/close tags
+6. Exactly ONE export default
+7. Default export MUST return JSX
+8. NO TypeScript syntax
+9. "=>" only, NEVER "= />"
+10. Complete files — no truncation, no placeholders
+11. Real content — no lorem ipsum
 
-━━━ AVAILABLE PACKAGES ━━━
-react@18, react-dom@18 (nothing else)`;
+AVAILABLE PACKAGES: react@18, react-dom@18 only`;
 }
 
 function buildFileUserPrompt(
   spec:           ComponentSpec,
   plan:           ProjectPlan,
+  tokens:         DesignTokens,
   generatedSoFar: StreamFile[],
 ): string {
-  const genMap      = new Map(generatedSoFar.map((f) => [f.path, f.content]));
-  const isDataFile  = /\/(utils?|data|lib)\//i.test(spec.path);
-  const isHookFile  = /\/hooks?\//i.test(spec.path);
-  const isAppFile   = spec.path === "src/App.jsx";
+  const genMap     = new Map(generatedSoFar.map((f) => [f.path, f.content]));
+  const isDataFile = /\/(utils?|data|lib)\//i.test(spec.path);
+  const isHookFile = /\/hooks?\//i.test(spec.path);
+  const isAppFile  = spec.path === "src/App.jsx";
 
-  // Inject dependency snippets (first 50 lines each)
   const depContext = (spec.dependencies ?? [])
     .map((dep) => {
       const content = genMap.get(dep);
@@ -353,7 +542,7 @@ function buildFileUserPrompt(
 
   if (isAppFile) {
     const renderables = generatedSoFar
-      .filter((f) => f.path.endsWith(".jsx") && f.path !== "src/App.jsx" && !isDataFile && !isHookFile)
+      .filter((f) => f.path.endsWith(".jsx") && f.path !== "src/App.jsx" && !/\/(hooks?|utils?|data|lib)\//i.test(f.path))
       .map((f) => {
         const name    = f.path.split("/").pop()!.replace(".jsx", "");
         const relPath = "./" + f.path.replace(/^src\//, "").replace(".jsx", "") + ".jsx";
@@ -362,58 +551,67 @@ function buildFileUserPrompt(
     const imports = renderables.map((c) => `import ${c.name} from '${c.relPath}';`).join("\n");
     const renders = renderables.map((c) => `      <${c.name} />`).join("\n");
     task = `Write src/App.jsx that composes all components.
-Imports to use:
+Use useEffect to inject global animation CSS:
+useEffect(() => {
+  const el = document.createElement('style'); el.id = 'ga';
+  el.textContent = '@keyframes fadeInUp{from{opacity:0;transform:translateY(32px)}to{opacity:1;transform:translateY(0)}}@keyframes fadeInDown{from{opacity:0;transform:translateY(-24px)}to{opacity:1;transform:translateY(0)}}@keyframes scaleIn{from{opacity:0;transform:scale(.88)}to{opacity:1;transform:scale(1)}}@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}@keyframes pulseGlow{0%,100%{box-shadow:0 0 20px ${tokens.primary}66}50%{box-shadow:0 0 40px ${tokens.primary}cc}}@keyframes blob{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(30px,-20px) scale(1.08)}66%{transform:translate(-20px,20px) scale(.94)}}@keyframes countUp{from{opacity:0;transform:translateY(16px) scale(.9)}to{opacity:1;transform:translateY(0) scale(1)}}@keyframes spin{to{transform:rotate(360deg)}}';
+  if(!document.getElementById('ga')) document.head.appendChild(el);
+  return()=>{const s=document.getElementById('ga');if(s)s.remove();};
+}, []);
+
+Imports:
+import React, { useEffect } from 'react';
 ${imports}
 
-Render them in order:
+Render in this order:
+<div style={{ minHeight: '100vh', background: '${tokens.bg}', fontFamily: '${tokens.bodyFont}', overflowX: 'hidden' }}>
 ${renders}
-
-Wrap in a <div> with style={{ minHeight: '100vh', background: '${plan.designSystem.colors.bg}', fontFamily: '${plan.designSystem.fonts}' }}.`;
+</div>`;
   } else if (isDataFile || isHookFile) {
-    task = `Write a complete JavaScript ${isHookFile ? "custom hook" : "utility/data"} file.
-Export named OR default exports. NO JSX. Pure JavaScript only.
-${isDataFile ? "Use realistic data — at least 5-8 items." : ""}`;
+    task = `Write a complete JavaScript ${isHookFile ? "custom React hook" : "data/utility"} file.
+Named OR default exports. NO JSX. Pure JS only.
+${isDataFile ? "Real, specific data — at least 6-8 items." : "Clean, reusable hook with proper cleanup."}`;
   } else {
-    task = `Write a complete, production-quality React component.
-Make it visually impressive with rich inline styles.
-Use the project's color palette: primary=${plan.designSystem.colors.primary}, bg=${plan.designSystem.colors.bg}.
-Use real, specific content — not placeholder text.
-Add real interactivity with useState where it makes sense (hover states, toggles, counters).
-The component must look premium and polished.`;
+    const roleInstructions = getRoleInstructions(spec, tokens);
+    task = `Write a COMPLETE, production-quality React component.
+${roleInstructions}
+
+MANDATORY:
+- Use design tokens (colors, gradients, fonts) from system prompt
+- At least one staggered entry animation
+- Display font (${tokens.displayFont}) for headings
+- Body font (${tokens.bodyFont}) for text
+- Real, specific content for "${plan.projectName}"
+- useState hover states on interactive elements`;
   }
 
   return `Write the COMPLETE file: ${spec.path}
-Component name: ${spec.name}
+Component: ${spec.name}
 Purpose: ${spec.description}
-Props interface: ${spec.props}
 
 ${task}
 
-${depContext ? `━━━ DEPENDENCY FILES ━━━\n${depContext}\n` : ""}
-Start the file content NOW. No explanation, no markdown, no backticks.`;
+${depContext ? `━━━ DEPENDENCY CONTEXT ━━━\n${depContext}\n` : ""}
+Start NOW. First char = first char of file. No explanation. No markdown.`;
 }
 
 // ─── Core file generator ──────────────────────────────────────────────────────
 
-/**
- * Generate a single file using the model roster.
- * Returns a StreamFile — either the generated content or a safe fallback.
- * NEVER throws.
- */
 async function generateSingleFile(
   spec:           ComponentSpec,
   plan:           ProjectPlan,
+  tokens:         DesignTokens,
   generatedSoFar: StreamFile[],
   onPing?:        () => void,
 ): Promise<StreamFile> {
   const models = getHealthyModels();
   if (models.length === 0) {
-    console.warn("[batch-generator] All models unhealthy — using fallback");
-    return makeFallback(spec);
+    console.warn("[batch-generator] All models unhealthy — fallback");
+    return makeFallback(spec, tokens);
   }
 
-  const system     = buildSystemPrompt(plan, generatedSoFar);
-  const userPrompt = buildFileUserPrompt(spec, plan, generatedSoFar);
+  const system     = buildSystemPrompt(plan, tokens, generatedSoFar);
+  const userPrompt = buildFileUserPrompt(spec, plan, tokens, generatedSoFar);
 
   for (let mi = 0; mi < models.length; mi++) {
     const model = models[mi];
@@ -426,14 +624,12 @@ async function generateSingleFile(
       const timeout   = setTimeout(() => abortCtrl.abort(), 90_000);
 
       try {
-        const temperature = 0.2 + attempt * 0.08; // Slightly higher temp on retries
-
+        const temperature = 0.25 + attempt * 0.08;
         console.log(`[batch-generator] ${mlabel(model)} → ${spec.path} (attempt ${attempt + 1}, t=${temperature.toFixed(2)})`);
 
         const res = await client.chat.completions.create(
           {
-            model,
-            temperature,
+            model, temperature,
             max_tokens: CODEGEN_MAX_TOKENS,
             messages: [
               { role: "system", content: system     },
@@ -444,53 +640,35 @@ async function generateSingleFile(
         );
 
         clearTimeout(timeout);
-        recordModelSuccess(model);
+        recordSuccess(model);
 
         const raw     = fixTokenCorruption(res.choices[0]?.message?.content ?? "");
         let   content = stripMarkdown(raw);
 
-        // Hard reject: too short
-        if (content.trim().length < MIN_FILE_CHARS) {
-          throw new Error(`Output too short: ${content.trim().length} chars`);
-        }
+        if (content.trim().length < MIN_FILE_CHARS) throw new Error(`Too short: ${content.trim().length}c`);
+        if (/=\s*\/\s*>/.test(content) || /<REDACTED/.test(content)) throw new Error("Token corruption");
 
-        // Hard reject: token corruption survived fix
-        if (/=\s*\/\s*>/.test(content) || /<REDACTED/.test(content)) {
-          throw new Error("Token corruption detected");
-        }
-
-        // Strip banned imports
         content = stripBannedImports(content);
 
-        // Normalize JSX files
         if (spec.path.endsWith(".jsx")) {
           content = ensureReactImport(content);
           content = ensureDefaultExport(content, spec.name);
         }
 
-        // Deduplicate imports
         content = deduplicateImports(content);
 
-        // Truncate oversized files (LLM sometimes generates huge files)
         if (content.length > MAX_FILE_CHARS) {
-          const trunc     = content.slice(0, MAX_FILE_CHARS);
-          const lastBrace = trunc.lastIndexOf("\n}");
-          content = lastBrace > MAX_FILE_CHARS * 0.6 ? trunc.slice(0, lastBrace + 2) : trunc;
-          if (spec.path.endsWith(".jsx")) {
-            content = ensureDefaultExport(content, spec.name);
-          }
+          const trunc = content.slice(0, MAX_FILE_CHARS);
+          const lb    = trunc.lastIndexOf("\n}");
+          content     = lb > MAX_FILE_CHARS * 0.6 ? trunc.slice(0, lb + 2) : trunc;
+          if (spec.path.endsWith(".jsx")) content = ensureDefaultExport(content, spec.name);
         }
 
         content = cleanOutput(content);
 
-        // Basic validation
         if (spec.path.endsWith(".jsx")) {
-          if (!/\bexport\s+default\b/.test(content)) {
-            throw new Error("No export default in output");
-          }
-          if (!/return\s*\(?\s*</.test(content)) {
-            throw new Error("No JSX return in output");
-          }
+          if (!/\bexport\s+default\b/.test(content)) throw new Error("No export default");
+          if (!/return\s*\(?\s*</.test(content))     throw new Error("No JSX return");
         }
 
         console.log(`[batch-generator] ✓ ${spec.path} (${content.length}c)`);
@@ -498,21 +676,12 @@ async function generateSingleFile(
 
       } catch (e: unknown) {
         clearTimeout(timeout);
-        recordModelFailure(model);
-
+        recordFailure(model);
         const status = (e as { status?: number })?.status ?? 0;
         const msg    = (e as Error)?.message ?? String(e);
-
-        if (status === 401 || status === 403) {
-          console.error("[batch-generator] Auth error — cannot continue");
-          return makeFallback(spec);
-        }
-
+        if (status === 401 || status === 403) { console.error("[batch-generator] Auth error"); return makeFallback(spec, tokens); }
         console.warn(`[batch-generator] ${mlabel(model)} ${spec.path} attempt ${attempt + 1} failed: ${msg}`);
-
-        if (attempt < MAX_FILE_RETRIES - 1) {
-          await sleepWithPing(backoffMs(attempt), onPing);
-        }
+        if (attempt < MAX_FILE_RETRIES - 1) await sleepWithPing(backoffMs(attempt), onPing);
       }
     }
 
@@ -520,57 +689,38 @@ async function generateSingleFile(
   }
 
   console.error(`[batch-generator] All models failed for ${spec.path} — fallback`);
-  return makeFallback(spec);
+  return makeFallback(spec, tokens);
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Generate all files in the project plan.
- *
- * WHY FILE-BY-FILE (not batch JSON):
- *   The old batch approach returned ALL files as a single JSON array with code as string values.
- *   LLMs cannot reliably JSON-escape multiline code (newlines, quotes, backslashes).
- *   A single escape error makes the entire JSON unparseable → ALL files fall back → blank UI.
- *   File-by-file means each file is independent — one failure does not affect others.
- *
- * Files are generated in dependency order with PARALLEL_BATCH concurrency.
- * App.jsx is always generated last so it has full context of all other components.
- */
 export async function generateAllFiles(
   plan:    ProjectPlan,
-  _ds:     DesignSystem,   // kept for API compat — design system is inside plan
+  _ds:     DesignSystem,
   onPing?: () => void,
 ): Promise<StreamFile[]> {
-  // Reset model health for this run
   modelFailures.clear();
 
-  const specs = plan.components;
-
-  // Split: App.jsx last, everything else in priority order
-  const appSpec    = specs.find((s) => s.path === "src/App.jsx");
-  const nonAppSpecs = specs.filter((s) => s.path !== "src/App.jsx");
-
+  const tokens    = resolveTokens(plan);
+  const specs     = plan.components;
+  const appSpec   = specs.find((s) => s.path === "src/App.jsx");
+  const nonApp    = specs.filter((s) => s.path !== "src/App.jsx");
   const generated: StreamFile[] = [];
 
-  console.log(`[batch-generator] Generating ${specs.length} files (batch=${PARALLEL_BATCH}, models=${getHealthyModels().map(mlabel).join(",")})`);
+  console.log(`[batch-generator] Generating ${specs.length} files (type: ${tokens.projectType}, models: ${getHealthyModels().map(mlabel).join(",")})`);
 
-  // Generate non-App files in parallel batches
-  for (let i = 0; i < nonAppSpecs.length; i += PARALLEL_BATCH) {
-    const batch = nonAppSpecs.slice(i, i + PARALLEL_BATCH);
+  for (let i = 0; i < nonApp.length; i += PARALLEL_BATCH) {
+    const batch = nonApp.slice(i, i + PARALLEL_BATCH);
     console.log(`[batch-generator] Batch ${Math.floor(i / PARALLEL_BATCH) + 1}: ${batch.map((s) => s.path).join(", ")}`);
-
     const results = await Promise.all(
-      batch.map((spec) => generateSingleFile(spec, plan, generated, onPing))
+      batch.map((spec) => generateSingleFile(spec, plan, tokens, generated, onPing))
     );
-
     generated.push(...results);
   }
 
-  // Generate App.jsx last — now it can reference all generated components
   if (appSpec) {
-    console.log(`[batch-generator] Generating src/App.jsx (final, has context of ${generated.length} files)`);
-    const appFile = await generateSingleFile(appSpec, plan, generated, onPing);
+    console.log(`[batch-generator] Generating src/App.jsx (final, context of ${generated.length} files)`);
+    const appFile = await generateSingleFile(appSpec, plan, tokens, generated, onPing);
     generated.push(appFile);
   }
 
@@ -578,19 +728,12 @@ export async function generateAllFiles(
   return generated;
 }
 
-// ─── Prompt fragment builders (kept for compat with design-system.ts) ─────────
+// ─── Compat exports ───────────────────────────────────────────────────────────
 
-/**
- * Build a batch system prompt — kept for backward compat only.
- * In v19, this is not used for actual generation (file-by-file is used instead).
- */
 export function buildBatchSystemPrompt(plan: ProjectPlan): string {
-  return `[batch-generator v19] System prompt for ${plan.projectName}. See generateAllFiles() for actual implementation.`;
+  return `[batch-generator v20] System prompt for ${plan.projectName}. See generateAllFiles().`;
 }
 
-/**
- * Build a batch user prompt — kept for backward compat only.
- */
 export function buildBatchUserPrompt(plan: ProjectPlan): string {
-  return `[batch-generator v19] User prompt for ${plan.projectName}. See generateAllFiles() for actual implementation.`;
+  return `[batch-generator v20] User prompt for ${plan.projectName}. See generateAllFiles().`;
 }

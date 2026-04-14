@@ -365,8 +365,8 @@ export function validateProjectStructure(files: AIFileResponse[]): {
   
   // Check for main.jsx
   const mainFile = files.find(f => f.path === "src/main.jsx");
-  if (mainFile && !mainFile.content.includes("ReactDOM.createRoot")) {
-    issues.push("main.jsx missing ReactDOM render");
+  if (mainFile && !mainFile.content.includes("createRoot")) {
+    issues.push("main.jsx missing createRoot render setup");
   }
   
   return {

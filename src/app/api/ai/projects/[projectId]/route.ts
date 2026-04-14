@@ -46,6 +46,9 @@ export async function GET(
       (f): AIFileNode => ({ path: f.path, content: f.content, type: "file" })
     );
 
+    console.log(`[GET /api/ai/projects/${projectId}] Loaded ${files.length} files from DB:`);
+    files.forEach((f) => console.log(`  - ${f.path}`));
+
     return NextResponse.json({
       project: {
         id:          dbProject.id,

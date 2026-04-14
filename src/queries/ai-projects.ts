@@ -93,6 +93,9 @@ export const upsertAIProjectFiles = async (
   if (!projectId) throw new Error("projectId is required");
   if (!files || files.length === 0) return;
 
+  console.log(`[upsertAIProjectFiles] Saving ${files.length} files for project ${projectId}`);
+  files.forEach((f) => console.log(`  - ${f.path}`));
+
   await db.$transaction(
     files.map((file) =>
       db.aIProjectFile.upsert({
@@ -114,10 +117,12 @@ export const upsertAIProjectFiles = async (
     )
   );
 
-  await db.aIProject.update({
-    where: { id: projectId },
-    data: { updatedAt: new Date() },
-  });
+  // ── VERIFY: Count files in DB after save ──
+  const count = await db.aIProjectFile.count({ where: { projectId } });
+  console.log(`[upsertAIProjectFiles] ✅ Saved. DB now contains ${count} files for project ${projectId}`);
+  if (count !== files.length) {
+    console.warn(`⚠️ WARNING: Expected ${files.length} files, but DB shows ${count}`);
+  }
 };
 
 // ── DELETE PROJECT ────────────────────────────────────────────────────────────

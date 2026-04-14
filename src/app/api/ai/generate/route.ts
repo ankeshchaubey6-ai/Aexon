@@ -18,6 +18,7 @@ import { Role } from "@prisma/client";
 import { getAuthUserDetails } from "@/queries/auth";
 import { createAIProject, upsertAIProjectFiles } from "@/queries/ai-projects";
 import { streamProjectPipeline } from "@/lib/ai/stream/stream-pipeline";
+import { db } from "@/lib/db";
 import { AIFileNode } from "@/lib/ai/types/ai-project.types";
 
 export const maxDuration = 300;
@@ -130,8 +131,10 @@ export async function POST(req: NextRequest) {
             };
             if (existing >= 0) {
               allFiles[existing] = node;
+              console.log(`[onFile] Updated: ${safeFile.path} (total: ${allFiles.length})`);
             } else {
               allFiles.push(node);
+              console.log(`[onFile] Added: ${safeFile.path} (total: ${allFiles.length})`);
             }
 
             send({
@@ -162,14 +165,35 @@ export async function POST(req: NextRequest) {
         // No extra sanitization — trust the pipeline
         const safeFiles = allFiles;
 
+        // ── LOG: Show all collected files before saving ──
+        console.log(`[SAVE] Collected ${safeFiles.length} files during generation:`);
+        safeFiles.forEach((f) => console.log(`  - ${f.path} (${f.content.length} bytes)`));
+
+        // ── CRITICAL: Ensure required boilerplate files are included ──
+        const REQUIRED_FILES = ["package.json", "index.html", "src/main.jsx", "src/App.jsx"];
+        const missingRequired = REQUIRED_FILES.filter((r) => !safeFiles.find((f) => f.path === r));
+        if (missingRequired.length > 0) {
+          console.warn(`⚠️ MISSING REQUIRED FILES AT SAVE TIME: ${missingRequired.join(", ")}`);
+          console.warn("   These files should have been emitted by the pipeline (S0 boilerplate).");
+        }
+
         // ── Save ALL files to DB once generation is complete ──
         if (safeFiles.length > 0) {
           try {
             await upsertAIProjectFiles(projectId, safeFiles);
-            console.log(`✅ Saved ${safeFiles.length} files to DB for project ${projectId}`);
+            console.log(`✅ Successfully saved ${safeFiles.length} files to DB for project ${projectId}`);
+            
+            // ── VERIFY: Read back from DB to confirm all files were saved ──
+            const verify = await db.aIProjectFile.count({ where: { projectId } });
+            console.log(`   Database now contains ${verify} files (expected: ${safeFiles.length})`);
+            if (verify !== safeFiles.length) {
+              console.error(`   ❌ MISMATCH: Expected to save ${safeFiles.length} files, but DB shows ${verify}`);
+            }
           } catch (dbErr) {
             console.error("⚠️ DB save failed:", dbErr);
           }
+        } else {
+          console.error("❌ NO FILES COLLECTED — nothing to save to database");
         }
 
         send({ type: "done", fileCount: safeFiles.length, projectId });
@@ -244,7 +268,7 @@ function makeFallbackFiles(prompt: string): AIFileNode[] {
     },
     {
       path: "src/main.jsx",
-      content: `import React from 'react';\nimport ReactDOM from 'react-dom/client';\nimport App from './App.jsx';\nReactDOM.createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);`,
+      content: `import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport App from './App.jsx';\ncreateRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);`,
       type: "file",
     },
     {

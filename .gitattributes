@@ -1,0 +1,5 @@
+# Git LFS for chunked snapshots (large binary JSON files > 50MB)
+public/snapshot/chunk-*.json filter=lfs diff=lfs merge=lfs -text
+
+# Handle manifest separately if it ever grows large
+public/snapshot/manifest.json filter=lfs diff=lfs merge=lfs -text
