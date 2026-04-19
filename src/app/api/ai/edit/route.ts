@@ -10,9 +10,10 @@ import { Role } from "@prisma/client";
 
 import { getAuthUserDetails } from "@/queries/auth";
 import { AIOrchestrator } from "@/lib/ai/engine/ai-orchestrator";
-import { editProjectWithPipeline } from "@/lib/ai/llm/pipeline";
+import { generateEdit } from "@/lib/ai/llm/editor";
 import { getAIProjectById, upsertAIProjectFiles } from "@/queries/ai-projects";
 import { AIFileNode } from "@/lib/ai/types/ai-project.types";
+import type { StreamFile } from "@/lib/ai/stream/stream-pipeline";
 
 export async function POST(req: NextRequest) {
   try {
@@ -94,8 +95,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Project has no files" }, { status: 404 });
     }
 
-    // ── Edit pipeline ─────────────────────────────────────────────────────
-    const updatedFiles = await editProjectWithPipeline(instructions, existingFiles);
+    // ── Edit pipeline — use real LLM-powered edit ─────────────────────────
+    console.log(`🔧 Editing project ${projectId} with instructions: ${instructions.slice(0, 60)}...`);
+    
+    const streamFiles: StreamFile[] = existingFiles.map((f) => ({
+      path: f.path,
+      content: f.content,
+    }));
+
+    const updatedFiles = await generateEdit(instructions, streamFiles);
 
     if (!updatedFiles || updatedFiles.length === 0) {
       return NextResponse.json(
@@ -104,8 +112,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Merge back into RAM ───────────────────────────────────────────────
-    const merged = AIOrchestrator.updateProjectFiles(projectId, updatedFiles);
+    // ── Convert back to AIFileNode format and merge ────────────────────────
+    const updatedAIFiles: AIFileNode[] = updatedFiles.map((f) => ({
+      path: f.path,
+      content: f.content,
+      type: "file" as const,
+    }));
+
+    const merged = AIOrchestrator.updateProjectFiles(projectId, updatedAIFiles);
 
     // ── Persist merged files to DB ────────────────────────────────────────
     await upsertAIProjectFiles(
@@ -114,12 +128,14 @@ export async function POST(req: NextRequest) {
     );
 
     // ── Diff summary ──────────────────────────────────────────────────────
-    const editedPaths = updatedFiles
+    const editedPaths = updatedAIFiles
       .filter((f: AIFileNode) => {
         const original = existingFiles.find((e) => e.path === f.path);
         return !original || original.content !== f.content;
       })
       .map((f: AIFileNode) => f.path);
+
+    console.log(`✅ Edit complete: ${editedPaths.length} file(s) modified`);
 
     return NextResponse.json({
       success: true,

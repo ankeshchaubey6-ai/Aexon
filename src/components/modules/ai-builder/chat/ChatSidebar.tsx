@@ -14,7 +14,7 @@ const ChatSidebar: React.FC = () => {
   const params = useParams();
   const subaccountId = params?.subaccountId as string;
 
-  const { setProject, setFiles, addMessage, projectId, files } =
+  const { setProject, setFiles, addMessage, projectId, files, messages } =
     useAIBuilderStore();
 
   const handleSend = async () => {
@@ -23,9 +23,9 @@ const ChatSidebar: React.FC = () => {
     const prompt = input.trim();
     const isEditMode = !!(projectId && files && files.length > 0);
 
-    addMessage({ role: "user", content: prompt });
+    addMessage({ role: "USER", content: prompt });
     addMessage({
-      role: "assistant",
+      role: "ASSISTANT",
       content: isEditMode
         ? "Applying your changes... ⏳"
         : "Generating your project... ⏳",
@@ -60,21 +60,21 @@ const ChatSidebar: React.FC = () => {
         setFiles(data.files);
 
         addMessage({
-          role: "assistant",
+          role: "ASSISTANT",
           content: isEditMode
             ? `Done! Changes applied to ${data.files.length} file(s) ✨`
             : "Project generated successfully 🚀",
         });
       } else {
         addMessage({
-          role: "assistant",
+          role: "ASSISTANT",
           content: "AI returned an empty result ❌",
         });
       }
     } catch (error) {
       console.error("AI Error:", error);
       addMessage({
-        role: "assistant",
+        role: "ASSISTANT",
         content: "Something went wrong. Please try again ❌",
       });
     } finally {
@@ -94,7 +94,7 @@ const ChatSidebar: React.FC = () => {
       </div>
 
       <ScrollArea className="flex-1 p-3">
-        <MessageList />
+        <MessageList messages={messages} />
       </ScrollArea>
 
       <div className="p-3 border-t flex gap-2">

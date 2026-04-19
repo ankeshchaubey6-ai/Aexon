@@ -1,0 +1,6 @@
+﻿import { cn } from '../../utils/cn.js';
+
+/** FeaturesGrid block — implement based on design spec */
+export function FeaturesGrid({ className, ...props }) {
+  return <section className={cn('py-20', className)} {...props}>{/* FeaturesGrid */}</section>;
+}

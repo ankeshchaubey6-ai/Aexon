@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <defs>
+    <pattern id="checkerboard" x="16" y="16" width="32" height="32" patternUnits="userSpaceOnUse">
+      <rect width="16" height="16" fill="#e5e7eb"/>
+      <rect x="16" y="0" width="16" height="16" fill="#f3f4f6"/>
+      <rect x="0" y="16" width="16" height="16" fill="#f3f4f6"/>
+      <rect x="16" y="16" width="16" height="16" fill="#e5e7eb"/>
+    </pattern>
+  </defs>
+  
+  <!-- Background checkerboard -->
+  <rect width="400" height="300" fill="url(#checkerboard)"/>
+  
+  <!-- Light overlay -->
+  <rect width="400" height="300" fill="#ffffff" opacity="0.3"/>
+  
+  <!-- Center container -->
+  <g transform="translate(200, 150)">
+    <!-- Icon circle -->
+    <circle cx="0" cy="-20" r="40" fill="none" stroke="#6b7280" stroke-width="2" opacity="0.6"/>
+    
+    <!-- Image icon (mountains + sun) -->
+    <g transform="translate(-35, -40)" stroke="#6b7280" stroke-width="2" fill="none" opacity="0.6">
+      <!-- Mountain peaks -->
+      <polyline points="10,30 25,10 40,25 50,15 60,30"/>
+      <!-- Sun -->
+      <circle cx="45" cy="12" r="5"/>
+    </g>
+    
+    <!-- Text -->
+    <text x="0" y="35" font-family="system-ui, -apple-system, sans-serif" font-size="16" fill="#6b7280" text-anchor="middle" opacity="0.7">
+      Image not available
+    </text>
+    <text x="0" y="60" font-family="system-ui, -apple-system, sans-serif" font-size="12" fill="#9ca3af" text-anchor="middle" opacity="0.6">
+      Please check the image URL
+    </text>
+  </g>
+</svg>

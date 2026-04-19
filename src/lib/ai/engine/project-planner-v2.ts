@@ -26,6 +26,7 @@ export interface ComponentSpec {
   description:  string;
   props:        string;
   dependencies: string[];
+  tier?:        "infrastructure" | "layout" | "page" | "feature" | "shared";
 }
 
 export interface ProjectPlan {
@@ -34,11 +35,18 @@ export interface ProjectPlan {
   designSystem: DesignSystem;
   components:   ComponentSpec[];
   appStructure: string;
+  modules?: Array<{ name: string; description: string; files: string[] }>;
+  qualityChecklist?: string[];
+  domainData?: {
+    entities: string[];
+    sampleFields: Record<string, string[]>;
+    uiPatterns: string[];
+  };
 }
 
 // ─── Complexity Mode (ROOT FIX #1) ───────────────────────────────────────────
 
-export type ComplexityMode = "minimal" | "standard" | "complex";
+export type ComplexityMode = "minimal" | "standard" | "complex" | "large";
 
 export interface ModeConfig {
   mode:            ComplexityMode;
@@ -60,7 +68,7 @@ const PLAN_MODELS = [
 
 type PlanModel = typeof PLAN_MODELS[number];
 
-const PLAN_MAX_TOKENS  = 4096;
+const PLAN_MAX_TOKENS  = 5000;
 const PING_INTERVAL_MS = 7_000;
 const PLAN_TIMEOUT_MS  = 120_000;
 
@@ -158,6 +166,22 @@ function startsWithDigit(path: string): boolean {
   return /^[0-9]/.test(path.split("/").pop() ?? "");
 }
 
+function getFileTier(filePath: string): ComponentSpec["tier"] {
+  if (
+    filePath.includes("types/") ||
+    filePath.includes("utils") ||
+    filePath.includes("hooks/") ||
+    filePath.includes("data/") ||
+    filePath.includes("tailwind.config")
+  ) {
+    return "infrastructure";
+  }
+  if (filePath.includes("Layout") || filePath.includes("Navbar") || filePath.includes("Sidebar") || filePath.includes("Footer")) return "layout";
+  if (filePath.includes("pages/") || filePath.includes("Page")) return "page";
+  if (filePath.includes("components/") || filePath.includes("sections/") || filePath.includes("features/")) return "feature";
+  return "shared";
+}
+
 // ─── Complexity Mode Detection (ROOT FIX #1) ──────────────────────────────────
 
 /**
@@ -209,7 +233,9 @@ export function detectComplexityMode(prompt: string): ModeConfig {
   ];
 
   const isMinimal = minimalSignals.some((re) => re.test(p));
-  const isComplex = complexSignals.some((re) => re.test(p));
+  const isLarge = /enterprise|full.?stack|complete|production|saas|dashboard|admin|platform|crm|analytics/i.test(prompt);
+  const isComplex = complexSignals.some((re) => re.test(p))
+    || /database|backend|auth|api|multi.?page|e.?commerce|marketplace/i.test(prompt);
 
   if (isMinimal && !isComplex) return {
     mode: "minimal",
@@ -219,19 +245,27 @@ export function detectComplexityMode(prompt: string): ModeConfig {
     description: "Generate 1–3 focused component files. The user wants something simple and direct. Do NOT over-engineer.",
   };
 
+  if (isLarge) return {
+    mode: "large",
+    targetFileCount: 16,
+    minFileCount: 13,
+    maxFileCount: 20,
+    description: "Generate 13-20 production-grade files for a polished large website or application shell, including shared infrastructure and feature modules.",
+  };
+
   if (isComplex) return {
     mode: "complex",
-    targetFileCount: 10,
-    minFileCount: 6,
-    maxFileCount: 13,
+    targetFileCount: 8,
+    minFileCount: 4,
+    maxFileCount: 11,
     description: "Generate 8–12 comprehensive component files for a full production website.",
   };
 
   return {
     mode: "standard",
-    targetFileCount: 5,
-    minFileCount: 3,
-    maxFileCount: 8,
+    targetFileCount: 6,
+    minFileCount: 4,
+    maxFileCount: 9,
     description: "Generate 4–6 component files for a well-structured website.",
   };
 }
@@ -257,9 +291,26 @@ JSON Schema:
       "name": "Hero",
       "description": "Full-screen hero section with gradient background, animated headline, subtitle, and two CTA buttons",
       "props": "{ title: string, subtitle: string, primaryCta: string, secondaryCta: string }",
-      "dependencies": []
+      "dependencies": [],
+      "tier": "feature"
     }
-  ]
+  ],
+  "modules": [
+    {
+      "name": "infrastructure",
+      "description": "Shared types, utils, hooks, and mock data",
+      "files": ["src/types/index.ts", "src/lib/utils.ts", "src/hooks/useLocalStorage.ts", "src/data/mockData.ts", "tailwind.config.ts"]
+    }
+  ],
+  "qualityChecklist": ["has-typescript-types", "has-responsive-layout", "has-realistic-data", "has-hover-states"],
+  "domainData": {
+    "entities": ["User", "Product", "Order"],
+    "sampleFields": {
+      "User": ["id", "name", "email", "role", "avatarUrl", "createdAt"],
+      "Product": ["id", "name", "price", "category", "imageUrl", "stock"]
+    },
+    "uiPatterns": ["data-table", "stat-cards", "line-chart", "sidebar-nav"]
+  }
 }
 
 COMPLEXITY MODE: ${mode.mode.toUpperCase()}
@@ -275,8 +326,15 @@ If the user asks for something "minimal", "simple", or a single component:
 - A navbar + hero + App.jsx = 3 files. That is acceptable.
 
 REQUIREMENTS FOR components ARRAY:
+- INFRASTRUCTURE FILES: for standard, complex, and large projects, include these files at the TOP of your list before UI components: src/types/index.ts, src/lib/utils.ts, src/hooks/useLocalStorage.ts, src/data/mockData.ts, tailwind.config.ts
+- After infrastructure files, list UI components in dependency order: layout first, pages second, feature components third, small shared components last
+- Return a "modules" array grouping files by feature area; each module should have 2-5 files
+- The "tier" field on each file must be one of: infrastructure, layout, page, feature, shared
+- The "qualityChecklist" array must always contain: has-typescript-types, has-responsive-layout, has-realistic-data, has-hover-states
+- Infer 2-4 main data entities from the prompt; for each entity, list 4-8 realistic field names in domainData.sampleFields
+- List 2-5 appropriate UI patterns in domainData.uiPatterns
 - ALWAYS include src/App.jsx as the LAST component in the array
-- Use component folders: src/components/, src/sections/, src/layouts/, src/hooks/, src/utils/
+- Use component folders: src/components/, src/sections/, src/layouts/, src/hooks/, src/utils/, src/lib/, src/data/, src/types/
 - props field: realistic TypeScript-style interface (documentation only, we use JS)
 - dependencies: list of paths from THIS project that this component imports
 - ALL paths MUST start with "src/"
@@ -309,7 +367,8 @@ export function validateAndTrimPlan(
   let comps = components
     .filter((c) => c.path.startsWith("src/"))
     .filter((c) => !c.path.endsWith(".css") && !c.path.endsWith(".scss") && !c.path.endsWith(".sass"))
-    .filter((c) => !c.path.endsWith(".ts") && !c.path.endsWith(".tsx"))
+    .filter((c) => !c.path.endsWith(".tsx"))
+    .filter((c) => !c.path.endsWith(".ts") || getFileTier(c.path) === "infrastructure")
     .filter((c) => !startsWithDigit(c.path))
     .filter((c) => !BOILERPLATE_PATHS.has(c.path));
 
@@ -412,12 +471,13 @@ Plan the project. Return ONLY the JSON object.`,
       const parsed  = JSON.parse(jsonStr) as Omit<ProjectPlan, "designSystem">;
 
       // Normalize component list
-      let components = (parsed.components ?? []).map((c) => ({
+      let components: ComponentSpec[] = (parsed.components ?? []).map((c) => ({
         path:         (c.path ?? "").replace(/^\/+/, ""),
         name:         c.name || pathToName(c.path ?? ""),
         description:  c.description || c.path || "Component",
         props:        c.props || "{}",
         dependencies: Array.isArray(c.dependencies) ? c.dependencies : [],
+        tier:         c.tier ?? getFileTier(c.path ?? ""),
       }));
 
       // ROOT FIX #3: Validate and trim to mode bounds
@@ -437,6 +497,9 @@ Plan the project. Return ONLY the JSON object.`,
         appStructure: parsed.appStructure || "App.jsx renders all components in a vertical layout.",
         designSystem: ds,
         components,
+        modules: Array.isArray(parsed.modules) ? parsed.modules : [],
+        qualityChecklist: ["has-typescript-types", "has-responsive-layout", "has-realistic-data", "has-hover-states"],
+        domainData: parsed.domainData ?? { entities: [], sampleFields: {}, uiPatterns: [] },
       };
 
       console.log(

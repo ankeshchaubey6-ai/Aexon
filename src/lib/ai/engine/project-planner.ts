@@ -1,20 +1,23 @@
 // src/lib/ai/engine/project-planner.ts
-// v21.0 — Mode-aware · Real validation gate · Font sanitization · No hardcoded file counts
+// v24.0 — Mode-aware · Font sanitization · Enhanced image rendering fixes · Real validation gate
 //
 // ROOT CAUSE FIXES APPLIED:
 //   🔴 FIX 1: detectComplexityMode() — reads prompt intent before any LLM calls
 //   🔴 FIX 2: CODEGEN_RULES no longer hardcodes "10-15 files" bias
 //   🔴 FIX 7: sanitizeFontString() prevents runtime crashes from quoted font values
-//   🔴 FIX 8: validateGeneratedFile() is now a real gate (unchanged, but actually called)
+//   🔴 FIX 8: validateGeneratedFile() is now a real gate (actually called in pipeline)
 //   🔴 FIX 9: buildComponentPrompt() uses mode to inject correct file count expectations
+//   🔴 FIX 10: IMAGE FIXES — onerror → onError, external URLs → /api/image proxy, URL validation
+//   🔴 FIX 10b: validateAndCleanImageUrl() — remove invalid Unsplash URLs, spaces, query text
+//   🔴 FIX 11: MAP() SAFETY — (items || []).map(), Array.isArray guards, default props
 //
 // SECTIONS
 //   1.  Imports & public types
-//   2.  CODEGEN_RULES — canonical prompt fragment (mode-neutral)
-//   3.  COMPONENT_TEMPLATES — zero-error reference skeletons (updated: inline styles only)
-//   4.  VALIDATION_PATTERNS — regex checks on LLM output
+//   2.  CODEGEN_RULES — canonical prompt fragment (image+map() rules included)
+//   3.  COMPONENT_TEMPLATES — zero-error reference skeletons (inline styles only)
+//   4.  VALIDATION_PATTERNS — regex checks on LLM output (image+map() validation included)
 //   5.  ProjectPlanner class — public API
-//   6.  Utility helpers
+//   6.  Utility helpers (image+map() sanitizers: validateAndCleanImageUrl, sanitizeImageElements, rewriteImageUrlsToProxy, sanitizeMapCalls, sanitizeOutput)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. IMPORTS & PUBLIC TYPES
@@ -146,7 +149,36 @@ I2. Identifiers must not start with a digit.
 J1. Never mutate state directly.
 J2. Cleanup side effects — return cleanup from useEffect when using timers/listeners.
 J3. Never call a hook after an early return.
+
+━━━ GROUP K — IMAGE HANDLING ━━━
+K1. NEVER use onerror="...". Always use onError prop (camelCase, React standard).
+K2. External image URLs MUST use proxy: /api/image?url=ENCODED_URL
+    WRONG:  src="https://images.unsplash.com/photo-xyz"
+    RIGHT:  src="/api/image?url=https://images.unsplash.com/photo-xyz"
+K3. ALWAYS include fallback error handler:
+    onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = '/api/image?url=' + encodeURIComponent('https://images.unsplash.com/photo-1518770660439-4636190af475'); }}
+K4. Use data: URIs or base64 for embedded images only — never for large photos.
+K5. Validate img alt text is descriptive (never empty on important images).
+
+━━━ GROUP L — MAP() SAFETY (CRITICAL—PREVENTS CRASHES) ━━━
+L1. FUNCTION PARAMS: ALWAYS provide default values for arrays:
+    WRONG: function CardRow({ items }) { ... items.map(...) }
+    RIGHT: function CardRow({ items = [] }) { ... items.map(...) }
+L2. BEFORE .map(): ALWAYS use safe syntax:
+    WRONG: items.map(...)
+    RIGHT: (items || []).map(...)
+    RIGHT: Array.isArray(items) ? items.map(...) : []
+L3. FILTER undefined/null from arrays BEFORE mapping:
+    const safeItems = items ?? [];
+    const filtered = safeItems.filter(x => x != null);
+    return filtered.map(...)
+L4. Never .map() on unpredictable data sources. Always guard.
+L5. In useEffect, validate data structure BEFORE rendering:
+    useEffect(() => {
+      if (!Array.isArray(data)) setData([]);
+    }, [data]);
 `;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. COMPONENT_TEMPLATES
@@ -487,6 +519,9 @@ export function validateGeneratedFile(file: FileContent): ValidationResult {
     errors.push(...checkIfInJSX(c, p));
     errors.push(...checkCssImports(c, p));
     errors.push(...checkFontStringQuotes(c, p));  // ROOT FIX #7
+    errors.push(...checkImageElements(c, p));    // IMAGE FIX #1: onerror prop
+    errors.push(...checkImageUrls(c, p));        // IMAGE FIX #2: external URLs
+    errors.push(...checkMapCalls(c, p));         // FIX #11: .map() safety
     warnings.push(...checkAsyncUseEffect(c, p));
     warnings.push(...checkMissingDepsArray(c, p));
     warnings.push(...checkProseAfterExport(c, p));
@@ -635,6 +670,158 @@ function checkFontStringQuotes(c: string, p: string): string[] {
   return [];
 }
 
+/**
+ * IMAGE FIX #1: Detect invalid React image props (onerror vs onError).
+ *
+ * HTML onerror attribute is lowercase and invalid in React.
+ * React requires camelCase: onError with proper handler function.
+ *
+ * Pattern: onerror="..."
+ * This check catches the common mistake before build breaks.
+ */
+function checkImageElements(c: string, p: string): string[] {
+  const errors: string[] = [];
+  // Check for onerror attribute (invalid in React)
+  if (/onerror\s*=\s*["']/i.test(c)) {
+    errors.push(`[${p}] IMAGE: Invalid onerror attribute found — use onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = '/api/image?url=' + encodeURIComponent('https://images.unsplash.com/photo-1507525428034-b723cf961d3e'); }}`);
+  }
+  return errors;
+}
+
+/**
+ * IMAGE FIX #2: Detect unproxied external image URLs and invalid URL patterns.
+ *
+ * BUILD-TIME VALIDATION (strict matching validateAndCleanImageUrl rules)
+ *
+ * REJECTS:
+ *   ❌ Invalid domains (not images.unsplash.com or images.pexels.com)
+ *   ❌ URLs with spaces or special characters
+ *   ❌ Query strings with uppercase text (descriptive content)
+ *   ❌ URLs containing "component", "layout", "image", "responsive", etc.
+ *   ❌ Unproxied external URLs
+ *
+ * REQUIRES:
+ *   ✅ https://images.unsplash.com/photo-XXXXXXX (valid format)
+ *   ✅ https://images.pexels.com/photos/XXXXXXX (valid format)
+ *   ✅ All must be proxied: /api/image?url=ENCODED_URL
+ *   ✅ All must have alt text
+ *
+ * Pattern: src="https://..." or src='https://...'
+ * Exemptions: /api/, data:, /public/, local paths
+ */
+function checkImageUrls(c: string, p: string): string[] {
+  const errors: string[] = [];
+  
+  // Match src attributes with external URLs (https://, http://)
+  const externalUrlPattern = /src\s*=\s*["']([^"']+)["']/gi;
+  
+  for (const match of c.matchAll(externalUrlPattern)) {
+    const fullMatch = match[0];
+    const url = match[1];
+    
+    // Skip exempted patterns (already safe)
+    if (url.startsWith('data:') || url.startsWith('/api/') || url.startsWith('/public/') || !url.match(/^https?:\/\//)) {
+      continue;
+    }
+    
+    // VALIDATION 1: Must use only images.unsplash.com or images.pexels.com
+    const isValidUnsplash = url.startsWith('https://images.unsplash.com') || url.startsWith('http://images.unsplash.com');
+    const isValidPexels = url.startsWith('https://images.pexels.com') || url.startsWith('http://images.pexels.com');
+    
+    if (!isValidUnsplash && !isValidPexels) {
+      // Check what domain is being used
+      if (url.includes('source.unsplash.com')) {
+        errors.push(`[${p}] IMAGE: Invalid domain — use images.unsplash.com (not source.unsplash.com)`);
+      } else if (url.includes('unsplash.com') && !url.includes('images.unsplash.com')) {
+        errors.push(`[${p}] IMAGE: Invalid Unsplash domain — must use images.unsplash.com/photo-XXXXXXX`);
+      } else if (url.includes('pexels.com') && !url.includes('images.pexels.com')) {
+        errors.push(`[${p}] IMAGE: Invalid Pexels domain — must use images.pexels.com/photos/XXXXXXX`);
+      } else if (url.includes('api.')) {
+        errors.push(`[${p}] IMAGE: API URLs not allowed — use direct image URL instead`);
+      } else {
+        errors.push(`[${p}] IMAGE: Invalid domain — only images.unsplash.com or images.pexels.com allowed\n         Found: ${url.slice(0, 80)}`);
+      }
+      continue;
+    }
+
+    // VALIDATION 2: URLs with spaces
+    if (/\s/.test(url)) {
+      errors.push(`[${p}] IMAGE: URL contains spaces — remove or use valid format\n         Found: ${url.slice(0, 80)}`);
+      continue;
+    }
+
+    // VALIDATION 3: Query strings with uppercase letters (descriptive text)
+    if (url.includes('?') && /\?.*[A-Z]/.test(url)) {
+      errors.push(`[${p}] IMAGE: URL contains query parameters with text — remove query strings\n         Found: ${url.slice(0, 80)}`);
+      continue;
+    }
+
+    // VALIDATION 4: Forbidden phrases
+    const forbiddenPhrases = ['component', 'layout', 'banner', 'responsive', 'featured', 'random'];
+    if (forbiddenPhrases.some(phrase => url.toLowerCase().includes(phrase))) {
+      errors.push(`[${p}] IMAGE: URL contains forbidden phrase — use direct photo ID\n         Found: ${url.slice(0, 80)}`);
+      continue;
+    }
+
+    // VALIDATION 5: Unsplash must have photo ID format
+    if (isValidUnsplash && !url.match(/\/photo-[0-9a-z]+/i)) {
+      errors.push(`[${p}] IMAGE: Unsplash URL missing photo ID — use format /photo-XXXXXXX\n         Found: ${url.slice(0, 80)}`);
+      continue;
+    }
+
+    // VALIDATION 6: Pexels must have numeric photo ID
+    if (isValidPexels && !url.match(/\/photos\/\d+/)) {
+      errors.push(`[${p}] IMAGE: Pexels URL missing photo ID — use format /photos/XXXXXXX\n         Found: ${url.slice(0, 80)}`);
+      continue;
+    }
+
+    // VALIDATION 7: All external URLs must be proxied
+    errors.push(`[${p}] IMAGE: External URL found — must wrap in proxy: /api/image?url=ENCODED_URL\n         Found: ${url.slice(0, 80)}`);
+  }
+  
+  return errors;
+}
+
+/**
+ * FIX #11: Detect unsafe .map() calls that can crash at runtime.
+ * Pattern: Direct .map() on unsanitized props (items.map instead of (items || []).map)
+ * 
+ * This catches:
+ * - items.map(...) without null coalescing
+ * - No default params in function signature
+ * - Unguarded .map() in effects/callbacks
+ */
+function checkMapCalls(c: string, p: string): string[] {
+  const errors: string[] = [];
+  
+  // Check for unsafe .map() pattern: identifier.map( where identifier is not wrapped
+  // This is a heuristic check - looks for common patterns
+  
+  // Pattern 1: Direct map without guard (items.map, data.map, etc.)
+  // But exclude cases that are already safe: (xxx || []).map, Array.isArray
+  const hasUnsafeMapPattern = /\b(?!const\s+|Array\.isArray\()(\w+)\.map\s*\((?=\s*[^=])/g;
+  const hasGuardedPattern = /(\(\s*\w+\s*\|\|\s*\[\].*\.map|Array\.isArray\s*\(\s*\w+\s*\)\s*\?)/;
+  
+  // Simple heuristic: if there's .map( and no guarding pattern found
+  if (/\.map\s*\(/.test(c) && !hasGuardedPattern.test(c)) {
+    // Check if there's unsafe map (not in template or already safe context)
+    const unsafeMatches = c.match(/[^=]\s+(\w+)\.map\s*\(/g);
+    if (unsafeMatches && unsafeMatches.length > 0) {
+      errors.push(`[${p}] MAP SAFETY: Potential unsafe .map() call detected — use (items || []).map(...) or Array.isArray guard`);
+    }
+  }
+  
+  // Check function params don't have default array value
+  if (/function\s+\w+\s*\(\s*{\s*\w+\s*}\s*\)/.test(c) || /const\s+\w+\s*=\s*\(\s*{\s*\w+\s*}\s*\)/.test(c)) {
+    // Pattern: { items } without = []
+    if (/{\s*\w+\s*}/.test(c) && !/{\s*\w+\s*=\s*\[\]/.test(c) && !/{\s*\w+\s*=\s*null/.test(c)) {
+      errors.push(`[${p}] MAP SAFETY: Function params without defaults — add = [] for arrays: ({ items = [] })`);
+    }
+  }
+  
+  return errors;
+}
+
 function checkTypeScriptLeaks(c: string, p: string): string[] {
   const errors: string[] = [];
   if (/:\s*React\.(FC|ReactNode|ReactElement|ComponentType)/.test(c)) {
@@ -758,8 +945,34 @@ useCallback((x) => fn(x), [deps])   ← dep array is SECOND arg
 useEffect(() => { ... }, [])        ← dep array ALWAYS required
 fontFamily: 'Syne, sans-serif'      ← NO inner quotes in font names
 ALL styling: inline style={{}} ONLY — no className, no CSS imports
+
+━━━ IMAGE HANDLING (GROUP K) ━━━
+NEVER onerror="..."                 ← use onError handler instead
+USE onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = '/api/image?url=' + encodeURIComponent('https://images.unsplash.com/photo-1518770660439-4636190af475'); }}
+REWRITE external URLs to proxy:     /api/image?url=ENCODED_URL
+Example:  src="/api/image?url=https%3A%2F%2Fimages.unsplash.com%2Fphoto-xyz"
+ALWAYS include alt text on img tags (never empty for important images)
+
+━━━ MAP() SAFETY FOR CRASH PREVENTION (GROUP L) ━━━
+PARAM DEFAULTS:  function CardRow({ items = [] }) ← ALWAYS default to []
+ALWAYS GUARD:    (items || []).map(...)  NOT  items.map(...)
+OR:              Array.isArray(items) ? items.map(...) : null
+BEFORE RENDER:   const safe = items ?? []; safe.map(...)
+
+Example—SAFE:
+function CardRow({ items = [] }) {
+  return (
+    <div>
+      {(items || []).map((item, i) => (
+        <div key={item.id ?? i}>{item.name}</div>
+      ))}
+    </div>
+  );
+}
+
 NEVER write explanation text after export default
 Start writing the file now:`;
+
   }
 
   static detectCategory(name: string, description: string): string {
@@ -796,6 +1009,273 @@ Start writing the file now:`;
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. UTILITY HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * IMAGE SANITIZER: Convert invalid onerror attribute to React onError handler.
+ *
+ * Replaces: onerror="handleError()"
+ * With:     onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = '/api/image?url=' + encodeURIComponent('https://images.unsplash.com/photo-1507525428034-b723cf961d3e'); }}
+ *
+ * This prevents React warnings and ensures proper error handling with double-guard.
+ */
+export function sanitizeImageElements(content: string): string {
+  // Match onerror attribute (case-insensitive) and replace with proper React onError
+  const fallbackUrl = "/api/image?url=" + encodeURIComponent("https://images.unsplash.com/photo-1518770660439-4636190af475");
+  return content.replace(
+    /\bonerror\s*=\s*["']([^"']*)["']/gi,
+    `onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = '${fallbackUrl}'; }}`
+  );
+}
+
+/**
+ * VALID UNSPLASH PHOTO IDs: Curated fallback images for broken URLs.
+ */
+const VALID_UNSPLASH_PHOTOS = [
+  'photo-1518770660439-4636190af475',  // Technology hardware
+  'photo-1498050108023-c5249f4df085',  // Coding workspace
+  'photo-1519389950473-47ba0277781c',  // Team on laptops
+  'photo-1560264357-8d9766c54b0f',     // Tech setup
+  'photo-1552664730-d307ca884978',     // Modern office
+  'photo-1522869635100-9f4c5e86aa37',  // Team collaboration
+];
+
+/**
+ * VALIDATE & CLEAN IMAGE URLs: Strict validation to ensure zero invalid URLs reach frontend.
+ *
+ * REJECTS:
+ *   1. URLs with spaces or special characters
+ *   2. URLs with more than 3 words (detected via uppercase in query params)
+ *   3. URLs containing phrases: "component", "layout", "image", "responsive", "banner"
+ *   4. Any domain OTHER than images.unsplash.com or images.pexels.com
+ *
+ * ALLOWS:
+ *   ✅ https://images.unsplash.com/photo-XXXXXXX
+ *   ✅ https://images.pexels.com/photos/XXXXXXX
+ *
+ * FALLBACK: If URL invalid, returns valid Unsplash photo ID
+ *
+ * Invalid patterns (REJECTED):
+ *   ❌ https://source.unsplash.com/featured/?Responsive layout...
+ *   ❌ https://images.unsplash.com/photo with spaces
+ *   ❌ https://api.unsplash.com/...
+ *   ❌ https://unsplash.com/... (wrong domain)
+ *
+ * Valid patterns (ACCEPTED):
+ *   ✅ https://images.unsplash.com/photo-1507525428034-b723cf961d3e
+ *   ✅ https://images.pexels.com/photos/1234567
+ */
+export function validateAndCleanImageUrl(url: string): string {
+  if (!url) {
+    // Return valid fallback
+    const fallback = VALID_UNSPLASH_PHOTOS[Math.floor(Math.random() * VALID_UNSPLASH_PHOTOS.length)];
+    return `https://images.unsplash.com/${fallback}`;
+  }
+
+  let cleaned = url.trim();
+
+  // REJECT 1: URLs with spaces or control characters
+  if (/\s/.test(cleaned) || /[<>{}"\|\\\^`]/.test(cleaned)) {
+    const fallback = VALID_UNSPLASH_PHOTOS[Math.floor(Math.random() * VALID_UNSPLASH_PHOTOS.length)];
+    return `https://images.unsplash.com/${fallback}`;
+  }
+
+  // REJECT 2: Query parameters with uppercase letters (indicates descriptive text)
+  // Pattern: ?Responsive or ?Layout or ?Component
+  if (cleaned.includes('?') && /\?.*[A-Z]/.test(cleaned)) {
+    const fallback = VALID_UNSPLASH_PHOTOS[Math.floor(Math.random() * VALID_UNSPLASH_PHOTOS.length)];
+    return `https://images.unsplash.com/${fallback}`;
+  }
+
+  // REJECT 3: URLs containing forbidden phrases
+  const forbiddenPhrases = [
+    'component', 'layout', 'banner', 'responsive',
+    'featured', 'random', 'search', 'category',
+    'section', 'element', 'template', 'widget',
+  ];
+  const lowerUrl = cleaned.toLowerCase();
+  if (forbiddenPhrases.some((phrase) => lowerUrl.includes(phrase))) {
+    const fallback = VALID_UNSPLASH_PHOTOS[Math.floor(Math.random() * VALID_UNSPLASH_PHOTOS.length)];
+    return `https://images.unsplash.com/${fallback}`;
+  }
+
+  // REQUIREMENT 4 & 5: ONLY allow images.unsplash.com or images.pexels.com
+  const isValidUnsplash = cleaned.startsWith('https://images.unsplash.com') || cleaned.startsWith('http://images.unsplash.com');
+  const isValidPexels = cleaned.startsWith('https://images.pexels.com') || cleaned.startsWith('http://images.pexels.com');
+  
+  if (!isValidUnsplash && !isValidPexels) {
+    // Reject: Invalid domain
+    const fallback = VALID_UNSPLASH_PHOTOS[Math.floor(Math.random() * VALID_UNSPLASH_PHOTOS.length)];
+    return `https://images.unsplash.com/${fallback}`;
+  }
+
+  // NORMALIZE: Remove query parameters, hash fragments
+  cleaned = cleaned.split('?')[0].split('#')[0];
+
+  // VALIDATE: Unsplash must have photo ID format
+  if (isValidUnsplash && !cleaned.match(/\/photo-[0-9a-z]+/i)) {
+    const fallback = VALID_UNSPLASH_PHOTOS[Math.floor(Math.random() * VALID_UNSPLASH_PHOTOS.length)];
+    return `https://images.unsplash.com/${fallback}`;
+  }
+
+  // VALIDATE: Pexels must have numeric photo ID
+  if (isValidPexels && !cleaned.match(/\/photos\/\d+/)) {
+    const fallback = VALID_UNSPLASH_PHOTOS[Math.floor(Math.random() * VALID_UNSPLASH_PHOTOS.length)];
+    return `https://images.unsplash.com/${fallback}`;
+  }
+
+  // REQUIREMENT 4 & 5: Encode and wrap in proxy
+  // (This is now done by rewriteImageUrlsToProxy after this function returns)
+  return cleaned;
+}
+
+/**
+ * IMAGE URL REWRITER: Convert external URLs to proxy endpoints.
+ *
+ * REQUIREMENT: Always encode URL and wrap in proxy
+ *
+ * BEFORE:  src="https://images.unsplash.com/photo-1507525428034-b723cf961d3e"
+ * AFTER:   src="/api/image?url=https%3A%2F%2Fimages.unsplash.com%2Fphoto-1507525428034-b723cf961d3e"
+ *
+ * GOAL: Zero invalid image URLs reach frontend
+ *
+ * Process:
+ *   1. Find external URLs (https://, http://)
+ *   2. Validate and clean via validateAndCleanImageUrl()
+ *   3. REQUIREMENT 4: Encode with encodeURIComponent()
+ *   4. REQUIREMENT 5: Wrap in /api/image?url=ENCODED_URL proxy
+ *
+ * Exemptions (left unchanged):
+ *   ✅ /api/ — already proxied
+ *   ✅ /public/ — local assets
+ *   ✅ ./ or / — relative paths
+ *   ✅ data: — embedded images
+ *
+ * This ensures images load correctly inside iframe/WebContainer.
+ */
+export function rewriteImageUrlsToProxy(content: string): string {
+  return content.replace(
+    /src\s*=\s*["'](?!(?:data:|\/api\/|\/public\/|\.\/|\/))([^"']+)["']/gi,
+    (match, urlPart) => {
+      // Skip data URLs and relative paths (already exempt)
+      if (urlPart.startsWith('data:') || !urlPart.match(/^https?:\/\//)) {
+        return match;
+      }
+
+      // Step 1: Validate and clean the URL (strict validation)
+      const cleanUrl = validateAndCleanImageUrl(urlPart);
+
+      // Step 2: REQUIREMENT 4 — Encode for safe URL parameter
+      const encodedUrl = encodeURIComponent(cleanUrl);
+
+      // Step 3: REQUIREMENT 5 — Wrap in proxy endpoint
+      return `src="/api/image?url=${encodedUrl}"`;
+    }
+  );
+}
+
+/**
+ * OUTPUT SANITIZER: Apply all image fixes to generated component code.
+ *
+ * Fixes applied in order:
+ *   1. Fix invalid onerror attributes → onError with proper React handler
+ *   2. Validate and clean image URLs (remove invalid patterns)
+ *   3. Proxy external URLs through /api/image endpoint
+ *   4. Ensure all img tags have proper alt text
+ *
+ * Call this before saving any LLM-generated component file.
+ */
+export function sanitizeOutputImages(content: string): string {
+  let result = content;
+
+  // FIX 1: Replace onerror → onError
+  result = sanitizeImageElements(result);
+
+  // FIX 2 & 3: Validate, clean, and proxy URLs
+  result = rewriteImageUrlsToProxy(result);
+
+  // FIX 4: Ensure img tags have alt text (add default if missing)
+  result = result.replace(
+    /<img\s+(?!.*\salt\s*=)([^>]*)\s*\/?>/gi,
+    (match, attrs) => {
+      // Add alt attribute if missing
+      const withAlt = `<img ${attrs} alt="Generated image"`;
+      return match.endsWith('/>') ? withAlt + ' />' : withAlt + '>';
+    }
+  );
+
+  return result;
+}
+
+/**
+ * MAP SAFETY SANITIZER: Fix unsafe .map() calls that crash at runtime.
+ *
+ * Fixes:
+ *   1. items.map(...) → (items || []).map(...)
+ *   2. Missing default params: ({ items }) → ({ items = [] })
+ *   3. Unsafe patterns in early Returns
+ *
+ * Call this before saving any generated component with array operations.
+ */
+export function sanitizeMapCalls(content: string): string {
+  let result = content;
+  
+  // Fix 1: Convert function params to have defaults
+  // Pattern: ({ items }) → ({ items = [] })
+  result = result.replace(
+    /function\s+(\w+)\s*\(\s*{\s*(\w+)\s*}\s*\)/g,
+    (match, funcName, param) => {
+      if (!/=\s*[\[\{]/.test(match)) {
+        // No default found, add = []
+        return match.replace(`{ ${param} }`, `{ ${param} = [] }`);
+      }
+      return match;
+    }
+  );
+  
+  // Also handle arrow function params
+  result = result.replace(
+    /const\s+(\w+)\s*=\s*\(\s*{\s*(\w+)\s*}\s*\)\s*=>/g,
+    (match, constName, param) => {
+      if (!/=\s*[\[\{]/.test(match)) {
+        return match.replace(`{ ${param} }`, `{ ${param} = [] }`);
+      }
+      return match;
+    }
+  );
+  
+  // Fix 2: Wrap unsafe .map() calls with safety guard
+  // Pattern: items.map( → (items || []).map(
+  // But first check it's not already wrapped
+  result = result.replace(
+    /(?<!\()\b(\w+)\.map\s*\(/g,
+    (match, varName) => {
+      // Check if already wrapped in guard
+      const beforeMatch = result.substring(Math.max(0, result.indexOf(match) - 20), result.indexOf(match));
+      if (beforeMatch.includes('|| []') || beforeMatch.includes('Array.isArray')) {
+        return match; // Already safe
+      }
+      return `(${varName} || []).map(`;
+    }
+  );
+  
+  return result;
+}
+
+/**
+ * UNIFIED OUTPUT SANITIZER: Fix all common runtime issues in generated code.
+ *
+ * Applies all sanitization fixes:
+ *   1. Image handling: onerror → onError, external URLs → proxy
+ *   2. Map safety: unsafe calls → guarded calls, missing defaults
+ *
+ * This is the main entry point — call this before saving ANY generated component.
+ */
+export function sanitizeOutput(content: string): string {
+  let result = content;
+  result = sanitizeOutputImages(result);
+  result = sanitizeMapCalls(result);
+  return result;
+}
 
 export function countJSXTags(
   content: string,

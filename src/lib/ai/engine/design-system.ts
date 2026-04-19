@@ -13,12 +13,14 @@ export interface DesignSystem {
  * Pure deterministic function — no LLM calls.
  */
 export function buildDesignSystem(prompt: string): DesignSystem {
-  const isDark = /dark|night|minimal|saas|dashboard|modern|glass/i.test(prompt);
+  const isDark = /dark|night|black|minimal|saas|dashboard|modern|glass/i.test(prompt);
+  const isRed = /red|crimson|scarlet|ruby|maroon/i.test(prompt);
   const isPurple = /purple|violet|indigo/i.test(prompt);
   const isGreen = /green|eco|nature|health/i.test(prompt);
-  const isBlue = /blue|ocean|tech|ai/i.test(prompt);
+  const isBlue = /blue|ocean|cyan|sky/i.test(prompt);
 
-  const primaryColor = isPurple ? "#8B5CF6"
+  const primaryColor = isRed ? "#DC2626"
+    : isPurple ? "#8B5CF6"
     : isGreen ? "#10B981"
     : isBlue ? "#3B82F6"
     : "#6366F1";
@@ -30,11 +32,11 @@ export function buildDesignSystem(prompt: string): DesignSystem {
     primary: primaryColor,
     primaryHover: primaryColor + "CC",
     bg: bgColor,
-    bgAlt: isDark ? "#1A1A2E" : "#F8FAFC",
-    bgCard: isDark ? "#1E1E2E" : "#FFFFFF",
+    bgAlt: isDark ? "#171717" : "#F8FAFC",
+    bgCard: isDark ? "#111111" : "#FFFFFF",
     text: textColor,
-    textMuted: isDark ? "#94A3B8" : "#64748B",
-    border: isDark ? "#2D2D44" : "#E2E8F0",
+    textMuted: isDark ? "#A3A3A3" : "#64748B",
+    border: isDark ? "#262626" : "#E2E8F0",
     success: "#10B981",
     warning: "#F59E0B",
     danger: "#EF4444",

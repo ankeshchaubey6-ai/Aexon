@@ -1,40 +1,41 @@
 "use client";
 
-import { useAIBuilderStore } from "../state/ai-builder.store";
+import React from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import ChatMessage, { type AIMessage } from "./ChatMessage";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
-const MessageList = () => {
-  const { messages } = useAIBuilderStore();
+interface MessageListProps {
+  messages: AIMessage[];
+  className?: string;
+}
+
+const MessageList: React.FC<MessageListProps> = ({ messages, className }) => {
+  const bottomRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
 
   return (
-    <div className="flex flex-col gap-3 text-sm">
-      {messages.length === 0 && (
-        <div className="rounded-md border p-2 bg-muted/40 text-muted-foreground">
-          Describe the app (e.g. "SaaS landing page with pricing and auth")
-          and I will generate the full project 🚀
-        </div>
-      )}
-
-      {messages.map((msg, i) => (
-        <div
-          key={i}
-          className={
-            msg.role === "user"
-              ? "flex justify-end"
-              : "flex justify-start"
-          }
-        >
-          <div
-            className={
-              msg.role === "user"
-                ? "bg-primary text-white px-3 py-2 rounded-md max-w-[80%]"
-                : "bg-muted px-3 py-2 rounded-md max-w-[80%]"
-            }
-          >
-            {msg.content}
-          </div>
-        </div>
-      ))}
-    </div>
+    <ScrollArea className={className}>
+      <div className="flex flex-col gap-2 p-3">
+        <AnimatePresence initial={false}>
+          {messages.map((msg) => (
+            <motion.div
+              key={msg.id}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.15 }}
+            >
+              <ChatMessage message={msg} />
+            </motion.div>
+          ))}
+        </AnimatePresence>
+        <div ref={bottomRef} className="h-1" />
+      </div>
+    </ScrollArea>
   );
 };
 

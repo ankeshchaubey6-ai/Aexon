@@ -22,6 +22,8 @@
 
 # Old snapshot format (replaced by chunked snapshots in public/snapshot/)
 public/node_modules.json
+public/snapshot/*.json
+public/sandbox/
 
 # IDE
 .idea

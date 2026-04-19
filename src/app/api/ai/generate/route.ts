@@ -1,15 +1,11 @@
 // src/app/api/ai/generate/route.ts
 //
-// PRODUCTION STREAMING ARCHITECTURE v2.0
+// FIX: The original code used `crypto.randomUUID()` as `projectId` for both
+// SSE events AND the DB upsert, but `dbProject.id` is the actual FK-anchored
+// DB record. Files saved under the random UUID were orphaned — they had no
+// parent AIProject row, so getAIProjectById returned 0 files on reload.
 //
-// SSE EVENT PROTOCOL:
-//   data: {"type":"project_init","projectId":"...","name":"..."}\n\n
-//   data: {"type":"file","path":"...","content":"...","provisional":true}\n\n
-//   data: {"type":"file","path":"...","content":"...","provisional":false}\n\n
-//   data: {"type":"log","message":"..."}\n\n
-//   data: {"type":"error","message":"..."}\n\n
-//   data: {"type":"done","fileCount":12}\n\n
-//   : keep-alive\n\n   ← heartbeat (SSE comment)
+// Fix: remove the random `projectId` entirely. Use `dbProject.id` everywhere.
 
 import { NextRequest } from "next/server";
 import { currentUser } from "@clerk/nextjs/server";
@@ -78,8 +74,27 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ───────────── CREATE DB PROJECT BEFORE STREAMING ─────────────
+  // FIX: Create the DB record HERE, outside the stream, so we have the real
+  // `dbProject.id` available to both the SSE events and the file upsert.
+  // Previously a random UUID was created here and used for saves — that UUID
+  // had no matching AIProject row, making all saved files unreachable.
+  let dbProject: { id: string };
+  try {
+    dbProject = await createAIProject(
+      subaccountId,
+      name || prompt.slice(0, 50) || "AI Project",
+      prompt
+    );
+  } catch (err) {
+    console.error("[generate] Failed to create DB project:", err);
+    return new Response(JSON.stringify({ error: "Failed to create project" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   // ───────────── SSE STREAM ─────────────
-  const projectId = crypto.randomUUID();
   const allFiles: AIFileNode[] = [];
 
   const stream = new ReadableStream({
@@ -103,26 +118,17 @@ export async function POST(req: NextRequest) {
       const heartbeat = setInterval(ping, 8_000);
 
       try {
-        // Create the DB project record first
-        const dbProject = await createAIProject(
-          subaccountId,
-          name || prompt.slice(0, 50) || "AI Project",
-          prompt
-        );
-
+        // FIX: Emit the real DB project ID so the client URL and store use it.
         send({
           type: "project_init",
-          projectId,
-          dbProjectId: dbProject?.id ?? projectId,
+          projectId: dbProject.id,    // ← was a random UUID before
+          dbProjectId: dbProject.id,
           name: name || prompt.slice(0, 50),
         });
 
-        // ── Run pipeline with all required callbacks ──
         await streamProjectPipeline(prompt, {
           onFile: async (file) => {
-            // Trust the pipeline — no extra sanitization
             const safeFile = file;
-
             const existing = allFiles.findIndex((f) => f.path === safeFile.path);
             const node: AIFileNode = {
               path: safeFile.path,
@@ -131,10 +137,8 @@ export async function POST(req: NextRequest) {
             };
             if (existing >= 0) {
               allFiles[existing] = node;
-              console.log(`[onFile] Updated: ${safeFile.path} (total: ${allFiles.length})`);
             } else {
               allFiles.push(node);
-              console.log(`[onFile] Added: ${safeFile.path} (total: ${allFiles.length})`);
             }
 
             send({
@@ -157,62 +161,61 @@ export async function POST(req: NextRequest) {
           onPing: ping,
 
           onDone: () => {
-            // Called when pipeline finishes successfully
-            console.log(`✅ Pipeline completed for project ${projectId}`);
+            console.log(`✅ Pipeline completed for project ${dbProject.id}`);
           },
         });
 
-        // No extra sanitization — trust the pipeline
-        const safeFiles = allFiles;
-
         // ── LOG: Show all collected files before saving ──
-        console.log(`[SAVE] Collected ${safeFiles.length} files during generation:`);
-        safeFiles.forEach((f) => console.log(`  - ${f.path} (${f.content.length} bytes)`));
+        console.log(`[SAVE] Collected ${allFiles.length} files for project ${dbProject.id}:`);
+        allFiles.forEach((f) => console.log(`  - ${f.path} (${f.content.length} bytes)`));
 
-        // ── CRITICAL: Ensure required boilerplate files are included ──
+        // ── Warn on missing required boilerplate ──
         const REQUIRED_FILES = ["package.json", "index.html", "src/main.jsx", "src/App.jsx"];
-        const missingRequired = REQUIRED_FILES.filter((r) => !safeFiles.find((f) => f.path === r));
+        const missingRequired = REQUIRED_FILES.filter((r) => !allFiles.find((f) => f.path === r));
         if (missingRequired.length > 0) {
-          console.warn(`⚠️ MISSING REQUIRED FILES AT SAVE TIME: ${missingRequired.join(", ")}`);
-          console.warn("   These files should have been emitted by the pipeline (S0 boilerplate).");
+          console.warn(`⚠️ MISSING REQUIRED FILES: ${missingRequired.join(", ")}`);
         }
 
-        // ── Save ALL files to DB once generation is complete ──
-        if (safeFiles.length > 0) {
+        // ── FIX: Save files under dbProject.id (the FK-anchored row) ──
+        if (allFiles.length > 0) {
           try {
-            await upsertAIProjectFiles(projectId, safeFiles);
-            console.log(`✅ Successfully saved ${safeFiles.length} files to DB for project ${projectId}`);
-            
-            // ── VERIFY: Read back from DB to confirm all files were saved ──
-            const verify = await db.aIProjectFile.count({ where: { projectId } });
-            console.log(`   Database now contains ${verify} files (expected: ${safeFiles.length})`);
-            if (verify !== safeFiles.length) {
-              console.error(`   ❌ MISMATCH: Expected to save ${safeFiles.length} files, but DB shows ${verify}`);
+            await upsertAIProjectFiles(dbProject.id, allFiles);
+            console.log(`✅ Saved ${allFiles.length} files to DB under project ${dbProject.id}`);
+
+            const verify = await db.aIProjectFile.count({ where: { projectId: dbProject.id } });
+            console.log(`   DB verification: ${verify} files (expected: ${allFiles.length})`);
+            if (verify !== allFiles.length) {
+              console.error(`   ❌ MISMATCH: saved ${allFiles.length}, DB shows ${verify}`);
             }
           } catch (dbErr) {
             console.error("⚠️ DB save failed:", dbErr);
           }
         } else {
-          console.error("❌ NO FILES COLLECTED — nothing to save to database");
+          console.error("❌ NO FILES COLLECTED — nothing to save");
         }
 
-        send({ type: "done", fileCount: safeFiles.length, projectId });
+        // FIX: Send the real dbProject.id in the done event so the client
+        // store and URL both reflect the correct project ID.
+        send({ type: "done", fileCount: allFiles.length, projectId: dbProject.id });
+
       } catch (err) {
         const msg = (err as Error)?.message ?? "Generation failed";
         console.error("❌ [generate/stream] crash:", msg);
         send({ type: "error", message: msg });
 
-        // Emit safe fallback files (CSS-free)
         const fallback = makeFallbackFiles(prompt);
         for (const f of fallback) {
-          send({
-            type: "file",
-            path: f.path,
-            content: f.content,
-            provisional: false,
-          });
+          send({ type: "file", path: f.path, content: f.content, provisional: false });
         }
-        send({ type: "done", fileCount: fallback.length, projectId, fallback: true });
+
+        // Save fallback files under the real project ID too
+        try {
+          await upsertAIProjectFiles(dbProject.id, fallback);
+        } catch (dbErr) {
+          console.error("⚠️ Fallback DB save failed:", dbErr);
+        }
+
+        send({ type: "done", fileCount: fallback.length, projectId: dbProject.id, fallback: true });
       } finally {
         clearInterval(heartbeat);
         controller.close();
@@ -227,6 +230,8 @@ export async function POST(req: NextRequest) {
       Connection: "keep-alive",
       "Transfer-Encoding": "chunked",
       "X-Accel-Buffering": "no",
+      // FIX: Expose the real project ID in the response header too
+      "x-project-id": dbProject.id,
     },
   });
 }
@@ -243,7 +248,9 @@ function makeFallbackFiles(prompt: string): AIFileNode[] {
           private: true,
           version: "0.0.0",
           type: "module",
-          scripts: { dev: "vite --host", build: "vite build" },
+          scripts: {
+  dev: "node node_modules/vite/dist/node/cli.js --host"
+},
           dependencies: { react: "^18.2.0", "react-dom": "^18.2.0" },
           devDependencies: { vite: "^5.2.6", "@vitejs/plugin-react": "^4.2.1" },
         },

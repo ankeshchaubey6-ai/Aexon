@@ -14,6 +14,8 @@
 import OpenAI from "openai";
 import { ProjectPlan, ComponentSpec } from "./project-planner-v2";
 import { DesignSystem } from "./design-system";
+import { resolveProjectImages, pickImagesForRole, ProjectImages } from "@/lib/ai/context/image-resolver";
+import { sanitizeOutput } from "@/lib/ai/sanitizeOutput";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,21 +28,40 @@ interface DesignTokens {
   projectType:    string;
   primary:        string;
   primaryLight:   string;
+  primaryDark?:   string;
   accent:         string;
+  accentLight?:   string;
   bg:             string;
   bgAlt:          string;
   bgCard:         string;
+  bgSurface?:     string;
+  bgHover?:       string;
   text:           string;
+  textPrimary?:   string;
+  textSecondary?: string;
   textMuted:      string;
   border:         string;
+  borderSubtle?:  string;
+  borderDefault?: string;
+  borderStrong?:  string;
+  success?:       string;
+  warning?:       string;
+  danger?:        string;
+  info?:          string;
   gradient:       string;
   gradientHero:   string;
+  gradientCard?:  string;
   glass:          string;
   glassBorder:    string;
+  shadowSm?:      string;
   shadow:         string;
+  shadowMd?:      string;
   shadowLg:       string;
+  radiusSm?:      string;
   radius:         string;
+  radiusMd?:      string;
   radiusLg:       string;
+  radiusXl?:      string;
   displayFont:    string;
   bodyFont:       string;
   animEase:       string;
@@ -57,13 +78,14 @@ const CODEGEN_MODELS = [
 ] as const;
 
 type CodegenModel = typeof CODEGEN_MODELS[number];
+type FileTier = "infrastructure" | "layout" | "page" | "feature" | "shared";
 
 const MAX_FILE_RETRIES   = 3;
 const MAX_FILE_CHARS     = 14_000;
 const MIN_FILE_CHARS     = 50;
-const CODEGEN_MAX_TOKENS = 6000;
+const CODEGEN_MAX_TOKENS = 8000;
 const PING_INTERVAL_MS   = 7_000;
-const PARALLEL_BATCH     = 3;
+const PARALLEL_BATCH     = 2;
 
 const BANNED_PACKAGES = [
   "framer-motion", "lucide-react", "react-router-dom", "react-router",
@@ -93,8 +115,8 @@ function getHealthyModels():           CodegenModel[] { return CODEGEN_MODELS.fi
 // ─── Rate limiter ─────────────────────────────────────────────────────────────
 
 const rlTimestamps: number[] = [];
-const RL_MAX_RPM  = 5;
-const RL_WINDOW   = 62_000;
+const RL_MAX_RPM  = 10;
+const RL_WINDOW   = 60_000;
 
 async function waitForRateLimit(label: string, onPing?: () => void): Promise<void> {
   const now     = Date.now();
@@ -197,6 +219,64 @@ function cleanOutput(content: string): string {
   return content.replace(/[ \t]+$/gm, "").replace(/\n{4,}/g, "\n\n\n").trimEnd() + "\n";
 }
 
+function withSurfaceTokens(tokens: DesignTokens): DesignTokens {
+  return {
+    ...tokens,
+    primaryDark: tokens.primaryDark ?? tokens.primary,
+    accentLight: tokens.accentLight ?? tokens.accent,
+    bgSurface: tokens.bgSurface ?? tokens.bgCard,
+    bgHover: tokens.bgHover ?? tokens.bgAlt,
+    textPrimary: tokens.textPrimary ?? tokens.text,
+    textSecondary: tokens.textSecondary ?? tokens.textMuted,
+    borderSubtle: tokens.borderSubtle ?? tokens.border,
+    borderDefault: tokens.borderDefault ?? tokens.border,
+    borderStrong: tokens.borderStrong ?? tokens.border,
+    success: tokens.success ?? "#10B981",
+    warning: tokens.warning ?? "#F59E0B",
+    danger: tokens.danger ?? "#EF4444",
+    info: tokens.info ?? "#3B82F6",
+    shadowSm: tokens.shadowSm ?? "0 1px 3px rgba(0,0,0,0.4)",
+    shadowMd: tokens.shadowMd ?? tokens.shadow,
+    radiusSm: tokens.radiusSm ?? "4px",
+    radiusMd: tokens.radiusMd ?? tokens.radius,
+    radiusXl: tokens.radiusXl ?? tokens.radiusLg,
+    gradientCard: tokens.gradientCard ?? `linear-gradient(135deg, ${tokens.primary}18 0%, ${tokens.accent}0d 100%)`,
+  };
+}
+
+function getFileTier(filePath: string): FileTier {
+  if (
+    filePath.includes("types/") ||
+    filePath.includes("utils") ||
+    filePath.includes("hooks/") ||
+    filePath.includes("data/") ||
+    filePath.includes("tailwind.config")
+  ) {
+    return "infrastructure";
+  }
+  if (filePath.includes("Layout") || filePath.includes("Navbar") || filePath.includes("Sidebar") || filePath.includes("Footer")) {
+    return "layout";
+  }
+  if (filePath.includes("pages/") || filePath.includes("Page")) {
+    return "page";
+  }
+  if (filePath.includes("components/") || filePath.includes("sections/") || filePath.includes("features/")) {
+    return "feature";
+  }
+  return "shared";
+}
+
+const TIER_ORDER: FileTier[] = ["infrastructure", "layout", "page", "feature", "shared"];
+
+function sortByDependencyOrder(files: ComponentSpec[]): ComponentSpec[] {
+  return [...files].sort((a, b) => {
+    const tierA = TIER_ORDER.indexOf(getFileTier(a.path));
+    const tierB = TIER_ORDER.indexOf(getFileTier(b.path));
+    if (tierA !== tierB) return tierA - tierB;
+    return a.path.localeCompare(b.path);
+  });
+}
+
 // ─── Design Token Resolver ────────────────────────────────────────────────────
 
 function resolveTokens(plan: ProjectPlan): DesignTokens {
@@ -209,6 +289,42 @@ function resolveTokens(plan: ProjectPlan): DesignTokens {
   const isStreaming   = /streaming|music|podcast|audio|video|media|entertainment/i.test(p);
   const isHealthcare  = /health|medical|clinic|fitness|wellness/i.test(p);
   const isEducation   = /education|learning|course|tutor|school|academy/i.test(p);
+  const isMarketplace = /marketplace|listing|seller|buyer|vendor|auction|classified/i.test(p);
+  const isTravel      = /travel|booking|hotel|flight|tour|destination|itinerary|trip/i.test(p);
+  const isPortfolio   = /portfolio|personal.?site|resume|showcase|freelance|designer|developer.?site/i.test(p);
+  const isRealEstate  = /real.?estate|property|rental|apartment|listing|mortgage|realtor/i.test(p);
+
+  if (isMarketplace) return withSurfaceTokens({
+    projectType: "marketplace", primary: "#E11D48", primaryLight: "#FB7185", primaryDark: "#9F1239", accent: "#F59E0B", accentLight: "#FCD34D",
+    bg: "#0C0A09", bgAlt: "#1C1917", bgCard: "#292524", bgSurface: "#44403C", bgHover: "#57534E", text: "#FAFAF9", textPrimary: "#FAFAF9", textSecondary: "#A8A29E", textMuted: "#78716C", border: "#44403C",
+    gradient: "linear-gradient(135deg, #E11D48 0%, #F59E0B 100%)", gradientHero: "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(225,29,72,0.3) 0%, transparent 70%)", gradientCard: "linear-gradient(135deg, rgba(225,29,72,0.08) 0%, rgba(245,158,11,0.04) 100%)",
+    glass: "rgba(255,255,255,0.04)", glassBorder: "rgba(255,255,255,0.1)", shadow: "0 4px 16px rgba(0,0,0,0.5)", shadowLg: "0 8px 32px rgba(0,0,0,0.6)", radius: "8px", radiusLg: "16px",
+    displayFont: "'Syne', sans-serif", bodyFont: "'DM Sans', sans-serif", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
+  });
+
+  if (isTravel) return withSurfaceTokens({
+    projectType: "travel", primary: "#FF6B35", primaryLight: "#FF8C5A", primaryDark: "#E04E1A", accent: "#004E89", accentLight: "#0369A1",
+    bg: "#0A0E1A", bgAlt: "#0F1629", bgCard: "#1A2540", bgSurface: "#253358", bgHover: "#2D3D6A", text: "#F8FAFC", textPrimary: "#F8FAFC", textSecondary: "#94A3B8", textMuted: "#64748B", border: "#253358",
+    gradient: "linear-gradient(135deg, #FF6B35 0%, #004E89 100%)", gradientHero: "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(255,107,53,0.28) 0%, transparent 70%)", gradientCard: "linear-gradient(135deg, rgba(255,107,53,0.08) 0%, rgba(0,78,137,0.04) 100%)",
+    glass: "rgba(255,255,255,0.04)", glassBorder: "rgba(255,255,255,0.1)", shadow: "0 4px 16px rgba(0,0,0,0.5)", shadowLg: "0 8px 32px rgba(0,0,0,0.6)", radius: "8px", radiusLg: "16px",
+    displayFont: "'Manrope', sans-serif", bodyFont: "'DM Sans', sans-serif", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
+  });
+
+  if (isPortfolio) return withSurfaceTokens({
+    projectType: "portfolio", primary: "#00FF87", primaryLight: "#4DFFA3", primaryDark: "#00CC6A", accent: "#7C3AED", accentLight: "#A78BFA",
+    bg: "#0A0A0A", bgAlt: "#111111", bgCard: "#1A1A1A", bgSurface: "#222222", bgHover: "#2A2A2A", text: "#FFFFFF", textPrimary: "#FFFFFF", textSecondary: "#888888", textMuted: "#555555", border: "#333333",
+    gradient: "linear-gradient(135deg, #00FF87 0%, #7C3AED 100%)", gradientHero: "radial-gradient(ellipse 60% 50% at 50% 0%, rgba(0,255,135,0.15) 0%, transparent 60%)", gradientCard: "linear-gradient(135deg, rgba(0,255,135,0.05) 0%, rgba(124,58,237,0.03) 100%)",
+    glass: "rgba(255,255,255,0.03)", glassBorder: "rgba(0,255,135,0.12)", shadow: "0 4px 16px rgba(0,255,135,0.1)", shadowLg: "0 8px 32px rgba(0,255,135,0.15)", radius: "4px", radiusLg: "8px",
+    displayFont: "'Space Grotesk', sans-serif", bodyFont: "'Space Grotesk', sans-serif", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
+  });
+
+  if (isRealEstate) return withSurfaceTokens({
+    projectType: "realestate", primary: "#1B5E20", primaryLight: "#2E7D32", primaryDark: "#145216", accent: "#FFC107", accentLight: "#FFD54F",
+    bg: "#0D1B0E", bgAlt: "#132015", bgCard: "#1A2E1C", bgSurface: "#243D26", bgHover: "#2E4D30", text: "#F1F8E9", textPrimary: "#F1F8E9", textSecondary: "#A5D6A7", textMuted: "#66BB6A", border: "#243D26",
+    gradient: "linear-gradient(135deg, #1B5E20 0%, #FFC107 100%)", gradientHero: "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(27,94,32,0.35) 0%, transparent 70%)", gradientCard: "linear-gradient(135deg, rgba(27,94,32,0.1) 0%, rgba(255,193,7,0.04) 100%)",
+    glass: "rgba(255,255,255,0.04)", glassBorder: "rgba(165,214,167,0.12)", shadow: "0 4px 16px rgba(0,0,0,0.5)", shadowLg: "0 8px 32px rgba(0,0,0,0.6)", radius: "8px", radiusLg: "12px",
+    displayFont: "'Libre Baskerville', serif", bodyFont: "'DM Sans', sans-serif", animEase: "cubic-bezier(0.22, 1, 0.36, 1)",
+  });
 
   if (isSaas) return {
     projectType: "saas", primary: "#6366F1", primaryLight: "#818CF8", accent: "#06B6D4",
@@ -308,12 +424,102 @@ function resolveTokens(plan: ProjectPlan): DesignTokens {
   };
 }
 
+// ─── Prop Safety Fixes ────────────────────────────────────────────────────────
+
+function applyPropSafetyFixes(content: string, filePath: string): string {
+  let result = content;
+
+  // FIX 1: Add default values to destructured object props in function signatures
+  // Pattern: function Name({ propName }) → function Name({ propName = {} })
+  // Pattern: function Name({ propName, other }) → function Name({ propName = {}, other = {} })
+  // BUT: skip props that already have defaults (= something)
+  // AND: skip props named children, className, style, key, ref (these are special)
+  const SKIP_PROPS = new Set(['children', 'className', 'style', 'key', 'ref', 'id']);
+  
+  result = result.replace(
+    /function\s+([A-Z][a-zA-Z0-9]*)\s*\(\s*\{([^}]+)\}\s*(?:=\s*\{\})?\s*\)/g,
+    (match, funcName, paramsStr) => {
+      const params = paramsStr.split(',').map((p: string) => p.trim()).filter(Boolean);
+      const fixedParams = params.map((param: string) => {
+        // Already has a default value
+        if (param.includes('=')) return param;
+        // Get just the param name (handle rename: alias: name)
+        const paramName = param.includes(':') ? param.split(':')[0].trim() : param.trim();
+        // Skip special props
+        if (SKIP_PROPS.has(paramName)) return param;
+        // Add safe default based on name heuristics
+        if (/items?|list|data|cards?|images?|photos?|posts?|products?|results?|entries|rows?/i.test(paramName)) {
+          return `${param} = []`;
+        }
+        return `${param} = {}`;
+      });
+      return `function ${funcName}({ ${fixedParams.join(', ')} })`;
+    }
+  );
+
+  // Same fix for arrow function components: const Name = ({ propName }) =>
+  result = result.replace(
+    /const\s+([A-Z][a-zA-Z0-9]*)\s*=\s*\(\s*\{([^}]+)\}\s*(?:=\s*\{\})?\s*\)\s*=>/g,
+    (match, funcName, paramsStr) => {
+      const params = paramsStr.split(',').map((p: string) => p.trim()).filter(Boolean);
+      const fixedParams = params.map((param: string) => {
+        if (param.includes('=')) return param;
+        const paramName = param.includes(':') ? param.split(':')[0].trim() : param.trim();
+        if (SKIP_PROPS.has(paramName)) return param;
+        if (/items?|list|data|cards?|images?|photos?|posts?|products?|results?|entries|rows?/i.test(paramName)) {
+          return `${param} = []`;
+        }
+        return `${param} = {}`;
+      });
+      return `const ${funcName} = ({ ${fixedParams.join(', ')} }) =>`;
+    }
+  );
+
+  // FIX 2: Wrap unsafe .map() calls
+  // Pattern: someVar.map( where someVar is NOT already wrapped in (someVar || [])
+  result = result.replace(
+    /(?<!\|\|\s*\[\]\s*\)\.|\?\s*)((?:[a-zA-Z_$][a-zA-Z0-9_$]*\.)*[a-zA-Z_$][a-zA-Z0-9_$]*)\.map\s*\(/g,
+    (match, varPath) => {
+      // Skip if already safe patterns
+      if (match.startsWith('(') || varPath === 'Array' || varPath === 'Object') return match;
+      return `(${varPath} || []).map(`;
+    }
+  );
+
+  // FIX 3: Wrap unsafe .filter() calls similarly
+  result = result.replace(
+    /(?<!\|\|\s*\[\]\s*\)\.|\?\s*)((?:[a-zA-Z_$][a-zA-Z0-9_$]*\.)*[a-zA-Z_$][a-zA-Z0-9_$]*)\.filter\s*\(/g,
+    (match, varPath) => {
+      if (match.startsWith('(') || varPath === 'Array' || varPath === 'Object') return match;
+      return `(${varPath} || []).filter(`;
+    }
+  );
+
+  // FIX 4: Add optional chaining to common property access patterns on props
+  // Pattern: propName.src → propName?.src (when propName is a known object prop name)
+  // Only apply inside JSX attribute values: src={image.src} → src={image?.src}
+  result = result.replace(
+    /(\{)\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\.(src|href|url|title|name|alt|label|text|description|id|value|content|path)\s*(\})/g,
+    (match, open, varName, prop, close) => {
+      // Skip if already using optional chaining
+      if (match.includes('?.')) return match;
+      return `${open}${varName}?.${prop}${close}`;
+    }
+  );
+
+  return result;
+}
+
 // ─── Fallback component ───────────────────────────────────────────────────────
 
 function makeFallback(spec: ComponentSpec, tokens: DesignTokens): StreamFile {
   const rawName  = spec.path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "Component";
   const safeName = rawName.replace(/[^a-zA-Z0-9_$]/g, "").replace(/^\d+/, "") || "Component";
   const compName = safeName.charAt(0).toUpperCase() + safeName.slice(1);
+
+  // Use proxied URL for the fallback image to ensure it works in COEP-restricted iframes
+  const fallbackImageUrl = "/api/image?url=" + 
+    encodeURIComponent("https://images.unsplash.com/photo-1507525428034-b723cf961d3e");
 
   const content = cleanOutput(
     `import React from 'react';
@@ -336,6 +542,17 @@ function ${compName}() {
         <p style={{ color: '${tokens.textMuted}', marginTop: '0.75rem', fontSize: '0.95rem', margin: 0 }}>
           ${spec.description}
         </p>
+        <img
+          src="${fallbackImageUrl}"
+          alt="fallback"
+          style={{
+            width: '300px',
+            height: '200px',
+            objectFit: 'cover',
+            borderRadius: '8px',
+            marginTop: '1rem'
+          }}
+        />
       </div>
     </section>
   );
@@ -349,15 +566,50 @@ export default ${compName};`
 
 // ─── Component role instructions ─────────────────────────────────────────────
 
-function getRoleInstructions(spec: ComponentSpec, tokens: DesignTokens): string {
+function getRoleInstructions(
+  spec: ComponentSpec,
+  tokens: DesignTokens,
+  projectImages?: ProjectImages,
+): string {
   const p = (spec.path + " " + spec.description).toLowerCase();
+
+  const { inlineHint, images } = projectImages
+    ? pickImagesForRole(spec.path, spec.description, projectImages)
+    : { inlineHint: "", images: [] };
+
+  // Wrap image URLs in proxy format for COEP-restricted iframes
+  const proxyUrl = (url: string) => `/api/image?url=${encodeURIComponent(url)}`;
+  
+  const imageUsage = images && images.length
+    ? `Use these images (REQUIRED):\n${images.map((i: any) => proxyUrl(i.url)).join("\n")}`
+    : `Use fallback image:\n${proxyUrl("https://images.unsplash.com/photo-1507525428034-b723cf961d3e")}`;
+
+  const selfContainedDataRule = `SELF-CONTAINED DATA RULE:
+This component will be rendered as <ComponentName /> with NO props from parent.
+Define ALL data (images array, testimonials array, nav links, etc.) as const arrays INSIDE the component function body.
+Use optional chaining (?.) when accessing object properties.
+Use (array || []).map() for all array iterations.
+
+`;
+
+  const mandatoryImageRule = `MANDATORY IMAGE RULE:
+
+* This component MUST render at least one <img> tag with the proxied URL (includes /api/image?url=)
+* NEVER return empty UI without images
+* NEVER rely only on background images
+* ALWAYS use provided image URLs or fallback — do NOT modify or strip the /api/image?url= prefix
+* Image must be visible in JSX
+
+${imageUsage}`;
 
   if (/nav|header|navbar/.test(p)) return `
 NAVBAR: Fixed top, full width, z-index 1000.
 - Glassmorphism bg: background '${tokens.glass}', backdropFilter 'blur(20px)', borderBottom '1px solid ${tokens.glassBorder}'
 - Logo left (display font, gradient text), nav links center (with hover underline), CTA button right
 - useState for mobile menu toggle with hamburger SVG
-- Animate in: fadeInDown`;
+- Animate in: fadeInDown${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/hero/.test(p)) return `
 HERO: Full viewport height (minHeight '100vh'), centered, position relative.
@@ -366,7 +618,9 @@ HERO: Full viewport height (minHeight '100vh'), centered, position relative.
 - Main heading: 4-6rem, display font, fontWeight 800. Use gradient text on key words.
 - Subheading: 1.2rem, textMuted, maxWidth 560px, auto margin
 - Two CTA buttons: glow primary + outline ghost
-- Staggered fadeInUp on all elements (0s, 0.15s, 0.3s, 0.45s)`;
+- Staggered fadeInUp on all elements (0s, 0.15s, 0.3s, 0.45s)${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/feature/.test(p)) return `
 FEATURES: 3 or 6 cards in CSS grid.
@@ -374,7 +628,9 @@ FEATURES: 3 or 6 cards in CSS grid.
 - Cards: bgCard bg, 1px border, radius, padding 1.75rem
 - Each card: SVG icon in colored circle (primary color), title, description
 - Hover: translateY(-6px), shadowLg, border color → primary
-- Staggered fadeInUp on cards`;
+- Staggered fadeInUp on cards${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/pricing/.test(p)) return `
 PRICING: 3 tiers — Starter, Pro (featured), Enterprise.
@@ -383,14 +639,18 @@ PRICING: 3 tiers — Starter, Pro (featured), Enterprise.
 - "Most popular" badge: gradient bg, absolute positioned
 - Feature list: SVG checkmarks in primary color
 - CTA buttons per card
-- Animate in with scaleIn + stagger`;
+- Animate in with scaleIn + stagger${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/testimonial|review/.test(p)) return `
 TESTIMONIALS: 3-4 cards in grid.
 - Each: large decorative quote mark (primary, low opacity), quote text, avatar (gradient circle + initials), name, role, 5 star SVG rating
 - Cards: glassmorphism or bgCard
 - Hover: subtle lift
-- Stagger fadeInUp`;
+- Stagger fadeInUp${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/stat|metric|count/.test(p)) return `
 STATS: 4-6 numbers in horizontal row.
@@ -398,20 +658,26 @@ STATS: 4-6 numbers in horizontal row.
 - Numbers: huge font (5xl+), display font, gradient text
 - Labels below in textMuted
 - Background bgAlt or subtle gradient
-- Animation: countUp on each stat`;
+- Animation: countUp on each stat${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/footer/.test(p)) return `
 FOOTER: Full-width, dark bg.
 - Logo + tagline | 3-4 nav columns (Product, Company, Resources, Legal) | social SVG icons
 - Bottom bar: copyright + links, border-top separator
-- Link hover: color → primary with transition`;
+- Link hover: color → primary with transition${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/cta|call.to.action|banner/.test(p)) return `
 CTA SECTION: High-impact conversion section.
 - Gradient sweep background or strong gradient overlay
 - Centered: eyebrow + large heading + subtext + two buttons
 - Blob decorations in corners
-- scaleIn animation`;
+- scaleIn animation${inlineHint}
+
+${mandatoryImageRule}`;
 
   return `
 COMPONENT: Premium visual quality matching ${tokens.projectType} design.
@@ -419,12 +685,60 @@ COMPONENT: Premium visual quality matching ${tokens.projectType} design.
 - Staggered entry animations with fadeInUp
 - Display font (${tokens.displayFont}) for headings, body font (${tokens.bodyFont}) for text
 - Real, specific content — no placeholders
-- Hover states on all interactive elements with useState`;
+- Hover states on all interactive elements with useState${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 }
 
 // ─── Prompt builders ──────────────────────────────────────────────────────────
 
-function buildSystemPrompt(plan: ProjectPlan, tokens: DesignTokens, generatedSoFar: StreamFile[]): string {
+function buildCssVariablesBlock(tokens: DesignTokens): string {
+  const t = withSurfaceTokens(tokens);
+  return `
+CSS CUSTOM PROPERTIES FOR THIS PROJECT - use these variable names for ALL colors, never hardcode hex:
+
+:root {
+  --primary:        ${t.primary};
+  --primary-light:  ${t.primaryLight};
+  --primary-dark:   ${t.primaryDark};
+  --accent:         ${t.accent};
+  --accent-light:   ${t.accentLight};
+  --bg:             ${t.bg};
+  --bg-alt:         ${t.bgAlt};
+  --bg-card:        ${t.bgCard};
+  --bg-surface:     ${t.bgSurface};
+  --bg-hover:       ${t.bgHover};
+  --text-primary:   ${t.textPrimary};
+  --text-secondary: ${t.textSecondary};
+  --text-muted:     ${t.textMuted};
+  --border-subtle:  ${t.borderSubtle};
+  --border-default: ${t.borderDefault};
+  --border-strong:  ${t.borderStrong};
+  --success:        ${t.success};
+  --warning:        ${t.warning};
+  --danger:         ${t.danger};
+  --info:           ${t.info};
+  --shadow-sm:      ${t.shadowSm};
+  --shadow-md:      ${t.shadowMd};
+  --shadow-lg:      ${t.shadowLg};
+  --radius-sm:      ${t.radiusSm};
+  --radius-md:      ${t.radiusMd};
+  --radius-lg:      ${t.radiusLg};
+  --radius-xl:      ${t.radiusXl};
+  --gradient:       ${t.gradient};
+  --gradient-hero:  ${t.gradientHero};
+  --gradient-card:  ${t.gradientCard};
+}
+`;
+}
+
+function buildSystemPrompt(
+  plan: ProjectPlan,
+  tokens: DesignTokens,
+  generatedSoFar: StreamFile[],
+  projectImages?: ProjectImages,
+): string {
+  const cssVariablesBlock = buildCssVariablesBlock(tokens);
   const generatedList = generatedSoFar
     .filter((f) => f.path.endsWith(".jsx") || f.path.endsWith(".js"))
     .map((f) => {
@@ -434,9 +748,19 @@ function buildSystemPrompt(plan: ProjectPlan, tokens: DesignTokens, generatedSoF
     })
     .join("\n") || "  (none yet)";
 
+  const imageSection = projectImages?.contextBlock
+    ? `\n${projectImages.contextBlock}\n`
+    : `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IMAGES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+No image API keys available. Use gradients, solid colors, or SVG backgrounds for visual appeal.
+`;
+
   return `You are an elite React engineer building production-grade websites with extraordinary visual quality.
 Output ONLY raw file content. The VERY FIRST character of your response = first character of the file.
 NO markdown. NO backticks. NO explanations. NO preamble. NO TypeScript.
+
+${cssVariablesBlock}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DESIGN TOKENS — use these in every component
@@ -499,7 +823,7 @@ Section label (eyebrow):
 ALREADY GENERATED
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${generatedList}
-
+${imageSection}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ABSOLUTE RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -514,6 +838,27 @@ ABSOLUTE RULES
 9. "=>" only, NEVER "= />"
 10. Complete files — no truncation, no placeholders
 11. Real content — no lorem ipsum
+12. PROP SAFETY: Every component that receives an object prop and accesses its properties MUST use optional chaining:
+    WRONG: function Card({ image }) { return <img src={image.src} /> }
+    RIGHT: function Card({ image = {} }) { return <img src={image?.src} /> }
+13. ARRAY PROP SAFETY: Every component that receives an array prop MUST default it to []:
+    WRONG: function Grid({ items }) { return items.map(...) }
+    RIGHT: function Grid({ items = [] }) { return (items || []).map(...) }
+14. APP.JSX RENDERING: Components rendered in App.jsx receive NO props from parent.
+    Every component must be fully self-contained with its own internal data/state.
+    NEVER design a component that requires props to be passed from App.jsx.
+    If a component needs data, define that data as a const INSIDE the component function.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IMAGE ENFORCEMENT (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+* EVERY component MUST include at least one <img>
+* NEVER generate empty sections without visual content
+* NEVER skip images or defer them to background-only treatment
+* ALWAYS use Unsplash/Pexels URLs from roleInstructions (they are pre-wrapped in /api/image?url=)
+* If no image provided, use fallback image: /api/image?url=https%3A%2F%2Fimages.unsplash.com%2Fphoto-1507525428034-b723cf961d3e
+* Image must be visible in JSX — not just CSS background
+* NEVER strip the /api/image?url= prefix or images will fail in the WebContainer iframe
 
 AVAILABLE PACKAGES: react@18, react-dom@18 only`;
 }
@@ -523,17 +868,37 @@ function buildFileUserPrompt(
   plan:           ProjectPlan,
   tokens:         DesignTokens,
   generatedSoFar: StreamFile[],
+  projectImages?: ProjectImages,
 ): string {
   const genMap     = new Map(generatedSoFar.map((f) => [f.path, f.content]));
   const isDataFile = /\/(utils?|data|lib)\//i.test(spec.path);
   const isHookFile = /\/hooks?\//i.test(spec.path);
   const isAppFile  = spec.path === "src/App.jsx";
 
+  // Calculate relative import path from current file to target file
+  const getRelativePath = (from: string, to: string): string => {
+    const fromParts = from.split("/").slice(0, -1); // Remove filename
+    const toParts = to.replace(".jsx", "").split("/");
+    
+    // Count how many directories up we need to go
+    let commonLen = 0;
+    for (let i = 0; i < Math.min(fromParts.length, toParts.length); i++) {
+      if (fromParts[i] === toParts[i]) commonLen++;
+      else break;
+    }
+    
+    const ups = fromParts.length - commonLen;
+    const downs = toParts.slice(commonLen).join("/");
+    const rel = (ups > 0 ? "../".repeat(ups) : "./") + downs + ".jsx";
+    return rel;
+  };
+
   const depContext = (spec.dependencies ?? [])
     .map((dep) => {
       const content = genMap.get(dep);
       if (!content) return null;
-      return `// ── DEP: ${dep} ──\n${content.split("\n").slice(0, 50).join("\n")}`;
+      const importPath = getRelativePath(spec.path, dep);
+      return `// ── IMPORT: import ComponentName from '${importPath}' ──\n// ── CONTENT: ${dep} ──\n${content.split("\n").slice(0, 40).join("\n")}`;
     })
     .filter(Boolean)
     .join("\n\n");
@@ -545,7 +910,7 @@ function buildFileUserPrompt(
       .filter((f) => f.path.endsWith(".jsx") && f.path !== "src/App.jsx" && !/\/(hooks?|utils?|data|lib)\//i.test(f.path))
       .map((f) => {
         const name    = f.path.split("/").pop()!.replace(".jsx", "");
-        const relPath = "./" + f.path.replace(/^src\//, "").replace(".jsx", "") + ".jsx";
+        const relPath = getRelativePath(spec.path, f.path);
         return { name, relPath };
       });
     const imports = renderables.map((c) => `import ${c.name} from '${c.relPath}';`).join("\n");
@@ -572,7 +937,7 @@ ${renders}
 Named OR default exports. NO JSX. Pure JS only.
 ${isDataFile ? "Real, specific data — at least 6-8 items." : "Clean, reusable hook with proper cleanup."}`;
   } else {
-    const roleInstructions = getRoleInstructions(spec, tokens);
+    const roleInstructions = getRoleInstructions(spec, tokens, projectImages);
     task = `Write a COMPLETE, production-quality React component.
 ${roleInstructions}
 
@@ -591,7 +956,7 @@ Purpose: ${spec.description}
 
 ${task}
 
-${depContext ? `━━━ DEPENDENCY CONTEXT ━━━\n${depContext}\n` : ""}
+${depContext ? `━━━ DEPENDENCY CONTEXT (with correct import paths) ━━━\n${depContext}\n` : ""}
 Start NOW. First char = first char of file. No explanation. No markdown.`;
 }
 
@@ -603,6 +968,7 @@ async function generateSingleFile(
   tokens:         DesignTokens,
   generatedSoFar: StreamFile[],
   onPing?:        () => void,
+  projectImages?: ProjectImages,
 ): Promise<StreamFile> {
   const models = getHealthyModels();
   if (models.length === 0) {
@@ -610,8 +976,8 @@ async function generateSingleFile(
     return makeFallback(spec, tokens);
   }
 
-  const system     = buildSystemPrompt(plan, tokens, generatedSoFar);
-  const userPrompt = buildFileUserPrompt(spec, plan, tokens, generatedSoFar);
+  const system     = buildSystemPrompt(plan, tokens, generatedSoFar, projectImages);
+  const userPrompt = buildFileUserPrompt(spec, plan, tokens, generatedSoFar, projectImages);
 
   for (let mi = 0; mi < models.length; mi++) {
     const model = models[mi];
@@ -656,6 +1022,7 @@ async function generateSingleFile(
         }
 
         content = deduplicateImports(content);
+        if (spec.path.endsWith(".jsx")) content = applyPropSafetyFixes(content, spec.path);
 
         if (content.length > MAX_FILE_CHARS) {
           const trunc = content.slice(0, MAX_FILE_CHARS);
@@ -692,6 +1059,20 @@ async function generateSingleFile(
   return makeFallback(spec, tokens);
 }
 
+/**
+ * Determines if a file should have its image URLs sanitized
+ * Sanitization applies to files that may contain HTML/JSX with image elements
+ */
+function shouldSanitizeFile(path: string): boolean {
+  // Sanitize JSX, HTML, and JS files, but not CSS or config files
+  const sanitizableExtensions = ['.jsx', '.js', '.html', '.tsx', '.ts'];
+  const isConfigFile = path.includes('vite.config') || path.includes('tailwind') || path.includes('postcss');
+  
+  if (isConfigFile) return false;
+  
+  return sanitizableExtensions.some(ext => path.endsWith(ext));
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function generateAllFiles(
@@ -701,31 +1082,63 @@ export async function generateAllFiles(
 ): Promise<StreamFile[]> {
   modelFailures.clear();
 
-  const tokens    = resolveTokens(plan);
-  const specs     = plan.components;
+  const tokens    = withSurfaceTokens(resolveTokens(plan));
+  const specs     = sortByDependencyOrder(plan.components);
   const appSpec   = specs.find((s) => s.path === "src/App.jsx");
   const nonApp    = specs.filter((s) => s.path !== "src/App.jsx");
   const generated: StreamFile[] = [];
 
   console.log(`[batch-generator] Generating ${specs.length} files (type: ${tokens.projectType}, models: ${getHealthyModels().map(mlabel).join(",")})`);
 
-  for (let i = 0; i < nonApp.length; i += PARALLEL_BATCH) {
-    const batch = nonApp.slice(i, i + PARALLEL_BATCH);
-    console.log(`[batch-generator] Batch ${Math.floor(i / PARALLEL_BATCH) + 1}: ${batch.map((s) => s.path).join(", ")}`);
+  // Fetch images (optional enhancement, non-fatal)
+  let projectImages: ProjectImages | undefined;
+  try {
+    console.log("[batch-generator] Fetching project images...");
+    projectImages = await resolveProjectImages(plan.description, tokens.projectType, {
+      unsplashKey: process.env.VITE_UNSPLASH_ACCESS_KEY,
+      pexelsKey: process.env.VITE_PEXELS_API_KEY,
+    });
+    console.log("[batch-generator] Images resolved");
+  } catch (e) {
+    console.log("[batch-generator] Image fetch failed (non-fatal) — continuing with gradients");
+    projectImages = undefined;
+  }
+
+  const infraFiles = nonApp.filter((s) => getFileTier(s.path) === "infrastructure");
+  const uiFiles = nonApp.filter((s) => getFileTier(s.path) !== "infrastructure");
+
+  if (infraFiles.length > 0) {
+    console.log(`[batch-generator] Infrastructure batch: ${infraFiles.map((s) => s.path).join(", ")}`);
     const results = await Promise.all(
-      batch.map((spec) => generateSingleFile(spec, plan, tokens, generated, onPing))
+      infraFiles.map((spec) => generateSingleFile(spec, plan, tokens, generated, onPing, projectImages))
+    );
+    generated.push(...results);
+  }
+
+  for (let i = 0; i < uiFiles.length; i += PARALLEL_BATCH) {
+    const batch = uiFiles.slice(i, i + PARALLEL_BATCH);
+    console.log(`[batch-generator] UI batch ${Math.floor(i / PARALLEL_BATCH) + 1}: ${batch.map((s) => s.path).join(", ")}`);
+    const results = await Promise.all(
+      batch.map((spec) => generateSingleFile(spec, plan, tokens, generated, onPing, projectImages))
     );
     generated.push(...results);
   }
 
   if (appSpec) {
     console.log(`[batch-generator] Generating src/App.jsx (final, context of ${generated.length} files)`);
-    const appFile = await generateSingleFile(appSpec, plan, tokens, generated, onPing);
+    const appFile = await generateSingleFile(appSpec, plan, tokens, generated, onPing, projectImages);
     generated.push(appFile);
   }
 
   console.log(`[batch-generator] ✓ Done — ${generated.length} files`);
-  return generated;
+  
+  // Sanitize all generated files to handle image URLs for COEP/iframe environments
+  const sanitized = generated.map((file) => ({
+    ...file,
+    content: shouldSanitizeFile(file.path) ? sanitizeOutput(file.content, file.path) : file.content,
+  }));
+  
+  return sanitized;
 }
 
 // ─── Compat exports ───────────────────────────────────────────────────────────

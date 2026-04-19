@@ -23,6 +23,8 @@
 //   S4  → Final emit — only changed files, all validated
 
 import OpenAI from "openai";
+import { resolveProjectImages, pickImagesForRole, ProjectImages } from "@/lib/ai/context/image-resolver";
+import { sanitizeOutput } from "@/lib/ai/sanitizeOutput";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 1 — PUBLIC TYPES
@@ -41,7 +43,39 @@ export interface PipelineCallbacks {
   onDone:   () => void;
   onError?: (msg: string) => void;
   onPing?:  () => void;
+  onEvent?: (event: PipelineStreamEvent) => void;
 }
+
+interface GenerationErrorEvent {
+  type: "GENERATION_ERROR";
+  code: string;
+  userMessage: string;
+  fileName?: string;
+  attempt?: number;
+  willRetry: boolean;
+  timestamp: number;
+}
+
+interface GenerationCompleteEvent {
+  type: "GENERATION_COMPLETE";
+  stats: {
+    totalFiles: number;
+    successCount: number;
+    retryCount: number;
+    stubbedCount: number;
+    failedCount: number;
+    totalChars: number;
+    elapsedMs: number;
+  };
+  files: Array<{
+    path: string;
+    status: FileGenerationStatus;
+    chars: number;
+    retries: number;
+  }>;
+}
+
+type PipelineStreamEvent = GenerationErrorEvent | GenerationCompleteEvent;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 2 — INTERNAL TYPES
@@ -51,6 +85,7 @@ interface FileSpec {
   path:         string;
   description:  string;
   dependencies: string[];
+  tier?:        FileTier;
 }
 
 interface ProjectSpec {
@@ -59,7 +94,73 @@ interface ProjectSpec {
   globalContext: string;
   primaryColor:  string;
   files:         FileSpec[];
+  modules?:      Array<{ name: string; description: string; files: string[] }>;
+  qualityChecklist?: string[];
+  domainData?: {
+    entities: string[];
+    sampleFields: Record<string, string[]>;
+    uiPatterns: string[];
+  };
 }
+
+type FileTier = "infrastructure" | "layout" | "page" | "feature" | "shared";
+type FileGenerationStatus = "success" | "stubbed" | "failed";
+
+interface FileGenerationResult {
+  file: StreamFile;
+  succeeded: boolean;
+  retryCount: number;
+  status: FileGenerationStatus;
+}
+
+interface GenerationSession {
+  sessionId: string;
+  prompt: string;
+  projectType: string;
+  startedAt: number;
+  completedAt?: number;
+  totalMs?: number;
+  stages: Array<{ name: string; durationMs: number }>;
+  fileCount: number;
+  successCount: number;
+  failedCount: number;
+}
+
+class SessionLogger {
+  private sessions: GenerationSession[] = [];
+  private readonly MAX = 20;
+
+  start(prompt: string, projectType: string): GenerationSession {
+    const session: GenerationSession = {
+      sessionId: Math.random().toString(36).slice(2),
+      prompt: prompt.slice(0, 100),
+      projectType,
+      startedAt: Date.now(),
+      stages: [],
+      fileCount: 0,
+      successCount: 0,
+      failedCount: 0,
+    };
+    this.sessions.push(session);
+    if (this.sessions.length > this.MAX) this.sessions.shift();
+    return session;
+  }
+
+  complete(session: GenerationSession): void {
+    session.completedAt = Date.now();
+    session.totalMs = session.completedAt - session.startedAt;
+  }
+
+  getLast(): GenerationSession | undefined {
+    return this.sessions[this.sessions.length - 1];
+  }
+
+  getAll(): GenerationSession[] {
+    return [...this.sessions];
+  }
+}
+
+export const sessionLogger = new SessionLogger();
 
 interface ValidationResult {
   passed:  boolean;
@@ -92,8 +193,22 @@ interface DesignTokens {
   animEase:       string;
 }
 
+interface PaletteOverride {
+  primary:      string;
+  primaryLight: string;
+  accent:       string;
+  bg?:          string;
+  bgAlt?:       string;
+  bgCard?:      string;
+  text?:        string;
+  textMuted?:   string;
+  border?:      string;
+  glass?:       string;
+  glassBorder?: string;
+}
+
 // ─── NEW: Complexity Mode ─────────────────────────────────────────────────────
-type ComplexityMode = "minimal" | "standard" | "complex";
+type ComplexityMode = "minimal" | "standard" | "complex" | "large";
 
 interface ModeConfig {
   mode:            ComplexityMode;
@@ -125,20 +240,22 @@ type CodegenModel = typeof CODEGEN_MODELS[number];
 const NVIDIA_BASE_URL     = "https://integrate.api.nvidia.com/v1";
 const MAX_FILE_RETRIES    = 3;
 const MAX_REGEN_PER_FILE  = 2;
-const PARALLEL_BATCH_SIZE = 3;
+const PARALLEL_BATCH_SIZE = 2;
 const PING_INTERVAL_MS    = 7_000;
 const MIN_FILE_CHARS      = 50;
 const MAX_FILE_CHARS      = 14_000;
 const JSX_IMBALANCE_TOL   = 2;
-const PLAN_MAX_TOKENS     = 4096;
-const CODEGEN_MAX_TOKENS  = 6000;
+const PLAN_MAX_TOKENS     = 5000;
+const CODEGEN_MAX_TOKENS  = 8000;
 
 const BOILERPLATE_PATHS = new Set([
-  "package.json", "index.html", "src/main.jsx", "vite.config.js",
+  "package.json",
+  "index.html",
+  "src/main.jsx",
 ]);
 
 // These are required in every generated project — pipeline enforces their presence
-const REQUIRED_PATHS = ["package.json", "index.html", "src/main.jsx", "vite.config.js", "src/App.jsx"] as const;
+const REQUIRED_PATHS = ["package.json", "index.html", "src/main.jsx", "src/App.jsx"] as const;
 
 const BANNED_PACKAGES = [
   "framer-motion", "lucide-react", "react-router-dom", "react-router",
@@ -148,6 +265,39 @@ const BANNED_PACKAGES = [
   "@tanstack/react-query", "next", "next/image", "next/link",
   "next/router", "next/navigation",
 ];
+
+const FALLBACK_IMAGE_SETS: Record<string, string[]> = {
+  tech: [
+    "https://images.unsplash.com/photo-1518770660439-4636190af475",
+    "https://images.unsplash.com/photo-1519389950473-47ba0277781c",
+    "https://images.unsplash.com/photo-1498050108023-c5249f4df085",
+  ],
+  automotive: [
+    "https://images.unsplash.com/photo-1492144534655-ae79c964c9d7",
+    "https://images.unsplash.com/photo-1503376780353-7e6692767b70",
+    "https://images.unsplash.com/photo-1541443131876-44b03de101c5",
+  ],
+  food: [
+    "https://images.unsplash.com/photo-1504674900247-0877df9cc836",
+    "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4",
+    "https://images.unsplash.com/photo-1540189549336-e6e99c3679fe",
+  ],
+  fashion: [
+    "https://images.unsplash.com/photo-1445205170230-053b83016050",
+    "https://images.unsplash.com/photo-1483985988355-763728e1935b",
+    "https://images.unsplash.com/photo-1496747611176-843222e1e57c",
+  ],
+  travel: [
+    "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800",
+    "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee",
+    "https://images.unsplash.com/photo-1507525428034-b723cf961d3e",
+  ],
+  business: [
+    "https://images.unsplash.com/photo-1552664730-d307ca884978",
+    "https://images.unsplash.com/photo-1522202176988-66273c2fd55f",
+    "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37",
+  ],
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 4 — MODE DETECTION (ROOT FIX #1, #2, #3)
@@ -204,7 +354,9 @@ function detectComplexityMode(prompt: string): ModeConfig {
   }
 
   const isMinimal = minimalSignals.some((re) => re.test(p));
-  const isComplex = complexSignals.some((re) => re.test(p));
+  const isLarge = /enterprise|full.?stack|complete|production|saas|dashboard|admin|platform|crm|analytics/i.test(prompt);
+  const isComplex = complexSignals.some((re) => re.test(p))
+    || /database|backend|auth|api|multi.?page|e.?commerce|marketplace/i.test(prompt);
 
   if (isMinimal && !isComplex) return {
     mode: "minimal",
@@ -214,20 +366,28 @@ function detectComplexityMode(prompt: string): ModeConfig {
     description: "Generate 1–3 focused component files. The user wants something simple. Do NOT over-engineer.",
   };
 
+  if (isLarge) return {
+    mode: "large",
+    targetFileCount: 16,
+    minFileCount: 13,
+    maxFileCount: 20,
+    description: "Generate 13-20 production-grade files for a polished large website or application shell, including shared infrastructure and feature modules.",
+  };
+
   if (isComplex) return {
     mode: "complex",
-    targetFileCount: 10,
-    minFileCount: 6,
-    maxFileCount: 13,
+    targetFileCount: 8,
+    minFileCount: 4,
+    maxFileCount: 11,
     description: "Generate 8–12 comprehensive component files for a full production website.",
   };
 
   // Standard: default
   return {
     mode: "standard",
-    targetFileCount: 5,
-    minFileCount: 3,
-    maxFileCount: 8,
+    targetFileCount: 6,
+    minFileCount: 4,
+    maxFileCount: 9,
     description: "Generate 4–6 component files for a well-structured website.",
   };
 }
@@ -235,6 +395,142 @@ function detectComplexityMode(prompt: string): ModeConfig {
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 5 — DESIGN TOKEN RESOLVER
 // ═══════════════════════════════════════════════════════════════════════════════
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const normalized = hex.replace("#", "");
+  const value = normalized.length === 3
+    ? normalized.split("").map((c) => c + c).join("")
+    : normalized;
+  const parsed = Number.parseInt(value, 16);
+  return {
+    r: (parsed >> 16) & 255,
+    g: (parsed >> 8) & 255,
+    b: parsed & 255,
+  };
+}
+
+function rgba(hex: string, alpha: number): string {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function mixHex(hexA: string, hexB: string, weight: number): string {
+  const a = hexToRgb(hexA);
+  const b = hexToRgb(hexB);
+  const mix = (start: number, end: number) => Math.round(start + (end - start) * weight);
+  return `#${[mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b)]
+    .map((n) => n.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function applyPalette(tokens: DesignTokens, palette: PaletteOverride): DesignTokens {
+  const primary = palette.primary;
+  const primaryLight = palette.primaryLight;
+  const accent = palette.accent;
+  const effectiveBg = palette.bg ?? tokens.bg;
+
+  return {
+    ...tokens,
+    primary,
+    primaryLight,
+    accent,
+    bg: effectiveBg,
+    bgAlt: palette.bgAlt ?? tokens.bgAlt,
+    bgCard: palette.bgCard ?? tokens.bgCard,
+    text: palette.text ?? tokens.text,
+    textMuted: palette.textMuted ?? tokens.textMuted,
+    border: palette.border ?? tokens.border,
+    gradient: `linear-gradient(135deg, ${primary} 0%, ${accent} 100%)`,
+    gradientHero: /^#f/i.test(effectiveBg)
+      ? `linear-gradient(160deg, ${mixHex(primary, "#ffffff", 0.9)} 0%, ${mixHex(accent, "#ffffff", 0.88)} 100%)`
+      : `radial-gradient(ellipse 80% 60% at 50% -10%, ${rgba(primary, 0.32)} 0%, transparent 70%)`,
+    glass: palette.glass ?? tokens.glass,
+    glassBorder: palette.glassBorder ?? rgba(primary, 0.18),
+    shadow: `0 4px 24px ${rgba(primary, 0.16)}`,
+    shadowLg: `0 20px 60px ${rgba(primary, 0.28)}`,
+  };
+}
+
+function resolvePromptPalette(input: string): PaletteOverride | null {
+  const p = input.toLowerCase();
+  const wantsDark = /\bblack\b|\bdark\b|\bcharcoal\b|\bnight\b|\bmidnight\b/.test(p);
+  const wantsLight = /\bwhite\b|\blight\b|\bclean\b/.test(p);
+
+  if (/\bred\b|\bcrimson\b|\bscarlet\b|\bruby\b|\bmaroon\b/.test(p)) {
+    if (wantsLight) {
+      return {
+        primary: "#DC2626",
+        primaryLight: "#F87171",
+        accent: "#111111",
+        bg: "#FFF7F7",
+        bgAlt: "#FFE4E6",
+        bgCard: "#FFFFFF",
+        text: "#111111",
+        textMuted: "#525252",
+        border: "#FCA5A5",
+        glass: "rgba(255,255,255,0.88)",
+        glassBorder: "rgba(220,38,38,0.14)",
+      };
+    }
+    return {
+      primary: "#DC2626",
+      primaryLight: "#F87171",
+      accent: wantsDark ? "#991B1B" : "#111111",
+      bg: "#050505",
+      bgAlt: "#111111",
+      bgCard: "#161616",
+      text: "#FAFAFA",
+      textMuted: "#A3A3A3",
+      border: "#262626",
+      glass: "rgba(255,255,255,0.04)",
+      glassBorder: "rgba(220,38,38,0.18)",
+    };
+  }
+
+  if (/\bgreen\b|\bemerald\b|\blime\b/.test(p)) {
+    return { primary: "#10B981", primaryLight: "#6EE7B7", accent: wantsDark ? "#064E3B" : "#047857" };
+  }
+
+  if (/\bpurple\b|\bviolet\b|\bindigo\b/.test(p)) {
+    return { primary: "#7C3AED", primaryLight: "#A78BFA", accent: "#C026D3" };
+  }
+
+  if (/\bblue\b|\bcyan\b|\bsky\b|\bocean\b/.test(p)) {
+    return { primary: "#2563EB", primaryLight: "#60A5FA", accent: "#06B6D4" };
+  }
+
+  if (/\borange\b|\bamber\b|\bgold\b|\byellow\b/.test(p)) {
+    return { primary: "#EA580C", primaryLight: "#FB923C", accent: "#F59E0B" };
+  }
+
+  return wantsDark
+    ? {
+        primary: "#F97316",
+        primaryLight: "#FDBA74",
+        accent: "#171717",
+        bg: "#050505",
+        bgAlt: "#111111",
+        bgCard: "#171717",
+        text: "#FAFAFA",
+        textMuted: "#A3A3A3",
+        border: "#262626",
+        glass: "rgba(255,255,255,0.04)",
+        glassBorder: "rgba(255,255,255,0.1)",
+      }
+    : null;
+}
+
+function resolveFallbackImage(seed: string, projectType?: string): string {
+  const input = `${seed} ${projectType ?? ""}`.toLowerCase();
+  const key =
+    /car|auto|automotive|vehicle|garage/.test(input) ? "automotive" :
+    /food|restaurant|chef|kitchen|meal|drink|cafe/.test(input) ? "food" :
+    /fashion|style|clothing|outfit|beauty/.test(input) ? "fashion" :
+    /travel|hotel|tour|trip|destination/.test(input) ? "travel" :
+    /tech|technology|ai|software|developer|coding|app|saas|dashboard/.test(input) ? "tech" :
+    "business";
+  return FALLBACK_IMAGE_SETS[key][0];
+}
 
 function resolveDesignTokens(prompt: string, projectName: string): DesignTokens {
   const p = (prompt + " " + projectName).toLowerCase();
@@ -248,7 +544,9 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
   const isStartup    = /startup|landing|launch|product hunt|waitlist|coming soon/i.test(p);
   const isEducation  = /education|learning|course|tutor|school|academy|university/i.test(p);
 
-  if (isSaas) return {
+  let tokens: DesignTokens;
+
+  if (isSaas) tokens = {
     projectType: "saas", primary: "#6366F1", primaryLight: "#818CF8", accent: "#06B6D4",
     bg: "#030712", bgAlt: "#0F172A", bgCard: "#111827", text: "#F9FAFB",
     textMuted: "#6B7280", border: "#1F2937",
@@ -262,7 +560,7 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     animDuration: "0.6s", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
   };
 
-  if (isFinance) return {
+  else if (isFinance) tokens = {
     projectType: "finance", primary: "#10B981", primaryLight: "#34D399", accent: "#F59E0B",
     bg: "#030B0F", bgAlt: "#061019", bgCard: "#0A1628", text: "#ECF0F1",
     textMuted: "#5D7A8A", border: "#0F2030",
@@ -276,7 +574,7 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     animDuration: "0.5s", animEase: "cubic-bezier(0.22, 1, 0.36, 1)",
   };
 
-  if (isEcommerce) return {
+  else if (isEcommerce) tokens = {
     projectType: "ecommerce", primary: "#E11D48", primaryLight: "#FB7185", accent: "#F59E0B",
     bg: "#FAFAF9", bgAlt: "#F5F5F4", bgCard: "#FFFFFF", text: "#1C1917",
     textMuted: "#78716C", border: "#E7E5E4",
@@ -290,7 +588,7 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     animDuration: "0.5s", animEase: "cubic-bezier(0.34, 1.56, 0.64, 1)",
   };
 
-  if (isCreative) return {
+  else if (isCreative) tokens = {
     projectType: "creative", primary: "#FF3D00", primaryLight: "#FF7043", accent: "#FFD600",
     bg: "#0A0A0A", bgAlt: "#111111", bgCard: "#181818", text: "#F5F5F5",
     textMuted: "#888888", border: "#222222",
@@ -304,7 +602,7 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     animDuration: "0.7s", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
   };
 
-  if (isStreaming) return {
+  else if (isStreaming) tokens = {
     projectType: "streaming", primary: "#A855F7", primaryLight: "#C084FC", accent: "#F43F5E",
     bg: "#09090B", bgAlt: "#18181B", bgCard: "#1C1C1E", text: "#FAFAFA",
     textMuted: "#71717A", border: "#27272A",
@@ -318,7 +616,7 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     animDuration: "0.6s", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
   };
 
-  if (isHealthcare) return {
+  else if (isHealthcare) tokens = {
     projectType: "healthcare", primary: "#0EA5E9", primaryLight: "#38BDF8", accent: "#10B981",
     bg: "#F8FAFC", bgAlt: "#F1F5F9", bgCard: "#FFFFFF", text: "#0F172A",
     textMuted: "#64748B", border: "#E2E8F0",
@@ -332,7 +630,7 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     animDuration: "0.5s", animEase: "cubic-bezier(0.34, 1.56, 0.64, 1)",
   };
 
-  if (isEducation) return {
+  else if (isEducation) tokens = {
     projectType: "education", primary: "#7C3AED", primaryLight: "#A78BFA", accent: "#F59E0B",
     bg: "#0D0D1A", bgAlt: "#13132A", bgCard: "#1A1A35", text: "#EDE9FE",
     textMuted: "#7C7C99", border: "#252550",
@@ -346,7 +644,7 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     animDuration: "0.6s", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
   };
 
-  if (isStartup) return {
+  else if (isStartup) tokens = {
     projectType: "startup", primary: "#2563EB", primaryLight: "#60A5FA", accent: "#F59E0B",
     bg: "#020817", bgAlt: "#0A1525", bgCard: "#0F1F38", text: "#F8FAFC",
     textMuted: "#64748B", border: "#1E3A5F",
@@ -359,8 +657,7 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     googleFontsUrl: "https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap",
     animDuration: "0.6s", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
   };
-
-  return {
+  else tokens = {
     projectType: "modern", primary: "#6366F1", primaryLight: "#818CF8", accent: "#F59E0B",
     bg: "#030712", bgAlt: "#0F172A", bgCard: "#111827", text: "#F9FAFB",
     textMuted: "#6B7280", border: "#1F2937",
@@ -373,6 +670,9 @@ function resolveDesignTokens(prompt: string, projectName: string): DesignTokens 
     googleFontsUrl: "https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500;600&display=swap",
     animDuration: "0.6s", animEase: "cubic-bezier(0.16, 1, 0.3, 1)",
   };
+
+  const promptPalette = resolvePromptPalette(p);
+  return promptPalette ? applyPalette(tokens, promptPalette) : tokens;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -535,6 +835,34 @@ function hasBannedImports(content: string): boolean {
   return false;
 }
 
+function classifyGenerationError(err: unknown): { code: string; userMessage: string; recoverable: boolean } {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/timeout|AbortError|ETIMEDOUT/i.test(msg)) return { code: "TIMEOUT", userMessage: "LLM request timed out - retrying.", recoverable: true };
+  if (/rate|429/i.test(msg)) return { code: "RATE_LIMITED", userMessage: "Rate limit hit - waiting before retry.", recoverable: true };
+  if (/token|length|max_tokens/i.test(msg)) return { code: "TOKEN_OVERFLOW", userMessage: "Generated file exceeded model limits - retrying with safer output.", recoverable: true };
+  if (/stub|placeholder|too short/i.test(msg)) return { code: "STUB_DETECTED", userMessage: "Generated file looked like a stub - retrying with explicit production instructions.", recoverable: true };
+  if (/json|parse/i.test(msg)) return { code: "PARSE_ERROR", userMessage: "LLM returned malformed output - retrying.", recoverable: true };
+  return { code: "UNKNOWN", userMessage: "Unexpected error during generation.", recoverable: false };
+}
+
+function emitGenerationError(
+  onEvent: ((event: PipelineStreamEvent) => void) | undefined,
+  err: unknown,
+  fileName: string,
+  attempt: number,
+): void {
+  const genError = classifyGenerationError(err);
+  onEvent?.({
+    type: "GENERATION_ERROR",
+    code: genError.code,
+    userMessage: genError.userMessage,
+    fileName,
+    attempt,
+    willRetry: genError.recoverable && attempt < MAX_FILE_RETRIES,
+    timestamp: Date.now(),
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 8 — VALIDATION (ROOT FIX #8: real gate, not fake)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -556,7 +884,9 @@ function detectAndFixSyntaxErrors(file: StreamFile): StreamFile {
 
   // ── Check 2: SVG path length limit ──
   // Any SVG path d attribute longer than 500 chars is replaced with safe placeholder
-  const longPathRegex = /d="[^"]{500,}"/g;
+  const longPathRegex = /d="[^"]{200,}"?/g;
+content = content.replace(longPathRegex, 'd="M0 0h24v24H0z"');
+
   const longPaths = content.match(longPathRegex);
   if (longPaths) {
     warnings.push(`⚠️ ${file.path}: Found ${longPaths.length} SVG path(s) longer than 500 chars — replacing with safe paths`);
@@ -602,7 +932,7 @@ function validateFile(file: StreamFile): ValidationResult {
  *   2. Safe-replaces structurally broken JSX
  *   3. Logs what it did and WHY
  */
-function applyValidationGate(files: StreamFile[], tokens: DesignTokens): StreamFile[] {
+function applyValidationGate(files: StreamFile[], tokens: DesignTokens, projectImages?: ProjectImages): StreamFile[] {
   return files.map((file) => {
     if (BOILERPLATE_PATHS.has(file.path)) return file;
     if (isCssFile(file.path)) {
@@ -611,12 +941,31 @@ function applyValidationGate(files: StreamFile[], tokens: DesignTokens): StreamF
     }
 
     // ── Apply syntax error detection and fixes ──
-    const fixedFile = detectAndFixSyntaxErrors(file);
+    let fixedFile = detectAndFixSyntaxErrors(file);
+
+    // ── Enforce mandatory image rendering ──
+    if (!fixedFile.content.includes("<img")) {
+      const imageUrl = pickImagesForRole(
+        file.path,
+        file.path,
+        projectImages ?? { hero: [], features: [], gallery: [], avatars: [], backgrounds: [], contextBlock: "" },
+      ).images[0]?.url ?? resolveFallbackImage(file.path, tokens.projectType);
+      plog(`[IMAGE FIX] Injecting fallback image into ${fixedFile.path}`);
+      fixedFile.content = fixedFile.content.replace(
+        "</section>",
+        `       <img
+        src="${imageUrl}"
+        alt="auto"
+        style={{ width: '300px', marginTop: '1rem' }}
+      />     </section>
+    `
+      );
+    }
 
     const v = validateFile(fixedFile);
     if (!v.passed) {
       plog(`[GATE] ${fixedFile.path} FAILED — ${v.reasons.join("; ")} → safe-replacing`);
-      return makeSafeComponent(fixedFile, tokens);
+      return makeSafeComponent(fixedFile, tokens, projectImages);
     }
     return fixedFile;
   }).filter(Boolean);
@@ -633,13 +982,18 @@ function assertStructuralIntegrity(files: StreamFile[]): { passed: boolean; miss
   return { passed: missing.length === 0, missing };
 }
 
-function makeSafeComponent(file: StreamFile, tokens: Partial<DesignTokens>): StreamFile {
+function makeSafeComponent(file: StreamFile, tokens: Partial<DesignTokens>, projectImages?: ProjectImages): StreamFile {
   const rawName  = file.path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "Component";
   const safeName = rawName.replace(/[^a-zA-Z0-9_$]/g, "").replace(/^\d+/, "") || "Component";
   const compName = safeName.charAt(0).toUpperCase() + safeName.slice(1);
   const bg       = tokens.bgCard    ?? "#111827";
   const text     = tokens.text      ?? "#F9FAFB";
   const muted    = tokens.textMuted ?? "#6B7280";
+  const imageUrl = pickImagesForRole(
+    file.path,
+    file.path,
+    projectImages ?? { hero: [], features: [], gallery: [], avatars: [], backgrounds: [], contextBlock: "" },
+  ).images[0]?.url ?? resolveFallbackImage(file.path, tokens.projectType);
 
   const content = cleanOutput(
     `import React from 'react';
@@ -650,6 +1004,11 @@ function ${compName}() {
       <div>
         <h2 style={{ fontSize: '1.75rem', fontWeight: 700, color: '${text}', margin: '0 0 0.75rem' }}>${compName}</h2>
         <p style={{ color: '${muted}', fontSize: '0.95rem', margin: 0 }}>${file.path}</p>
+        <img
+          src="${imageUrl}"
+          alt="fallback"
+          style={{ width: '300px', height: '200px', marginTop: '1rem', borderRadius: '8px', objectFit: 'cover' }}
+        />
       </div>
     </section>
   );
@@ -846,9 +1205,26 @@ Schema:
     {
       "path": "src/components/Hero.jsx",
       "description": "Full-screen hero section with animated headline and CTA buttons",
-      "dependencies": []
+      "dependencies": [],
+      "tier": "feature"
     }
-  ]
+  ],
+  "modules": [
+    {
+      "name": "infrastructure",
+      "description": "Shared types, utils, hooks, and mock data",
+      "files": ["src/types/index.ts", "src/lib/utils.ts", "src/hooks/useLocalStorage.ts", "src/data/mockData.ts", "tailwind.config.ts"]
+    }
+  ],
+  "qualityChecklist": ["has-typescript-types", "has-responsive-layout", "has-realistic-data", "has-hover-states"],
+  "domainData": {
+    "entities": ["User", "Product", "Order"],
+    "sampleFields": {
+      "User": ["id", "name", "email", "role", "avatarUrl", "createdAt"],
+      "Product": ["id", "name", "price", "category", "imageUrl", "stock"]
+    },
+    "uiPatterns": ["data-table", "stat-cards", "line-chart", "sidebar-nav"]
+  }
 }
 
 COMPLEXITY MODE: ${mode.mode.toUpperCase()}
@@ -860,12 +1236,19 @@ If the user asks for a "minimal" or "simple" component, plan ONLY what they aske
 Do NOT add extra files to pad the plan.
 
 REQUIREMENTS:
+- INFRASTRUCTURE FILES: for standard, complex, and large projects, include these files at the TOP of the file list before UI components: src/types/index.ts, src/lib/utils.ts, src/hooks/useLocalStorage.ts, src/data/mockData.ts, tailwind.config.ts
+- After infrastructure files, list UI components in dependency order: layout first, pages second, feature components third, small shared components last
+- Return a "modules" array grouping files by feature area; each module should have 2-5 files
+- The "tier" field on each file must be one of: infrastructure, layout, page, feature, shared
+- The "qualityChecklist" array must always contain: has-typescript-types, has-responsive-layout, has-realistic-data, has-hover-states
+- Infer 2-4 main data entities from the prompt; for each entity, list 4-8 realistic field names in domainData.sampleFields
+- List 2-5 appropriate UI patterns in domainData.uiPatterns
 - ALWAYS include src/App.jsx as the last file
 - ALL paths must start with "src/"
-- Folders: src/components/, src/sections/, src/layouts/, src/hooks/, src/utils/
+- Folders: src/components/, src/sections/, src/layouts/, src/hooks/, src/lib/, src/data/, src/types/
 - NEVER include: package.json, index.html, src/main.jsx, vite.config.js
 - NEVER include ANY .css file
-- NEVER use TypeScript (.ts/.tsx)
+- TypeScript infrastructure files are allowed; UI components should stay .jsx for this pipeline
 - File names must NOT start with a digit
 - Only available packages: react@18, react-dom@18
 - BANNED: framer-motion, lucide-react, react-router-dom, axios, three, zustand, recharts, gsap, next, clsx
@@ -889,10 +1272,12 @@ function validateAndTrimPlan(parsed: ProjectSpec, mode: ModeConfig): ProjectSpec
       path:         (f.path ?? "").replace(/^\/+/, ""),
       description:  f.description || f.path || "Component",
       dependencies: Array.isArray(f.dependencies) ? f.dependencies : [],
+      tier:          f.tier,
     }))
     .filter((f) => f.path.startsWith("src/"))
     .filter((f) => !isCssFile(f.path))
-    .filter((f) => !f.path.endsWith(".ts") && !f.path.endsWith(".tsx"))
+    .filter((f) => !f.path.endsWith(".tsx"))
+    .filter((f) => !f.path.endsWith(".ts") || getFileTier(f.path) === "infrastructure")
     .filter((f) => !/^[0-9]/.test(f.path.split("/").pop() ?? ""))
     .filter((f) => !BOILERPLATE_PATHS.has(f.path));
 
@@ -910,6 +1295,7 @@ function validateAndTrimPlan(parsed: ProjectSpec, mode: ModeConfig): ProjectSpec
       path:         "src/App.jsx",
       description:  "Root component — imports and composes all sections and components",
       dependencies: trimmed.filter((f) => f.path.endsWith(".jsx")).map((f) => f.path),
+      tier:         "page",
     });
   } else {
     trimmed.push(appFiles[0]);
@@ -918,6 +1304,13 @@ function validateAndTrimPlan(parsed: ProjectSpec, mode: ModeConfig): ProjectSpec
   return {
     ...parsed,
     files: trimmed,
+    modules: Array.isArray(parsed.modules) ? parsed.modules : [],
+    qualityChecklist: ["has-typescript-types", "has-responsive-layout", "has-realistic-data", "has-hover-states"],
+    domainData: parsed.domainData ?? {
+      entities: [],
+      sampleFields: {},
+      uiPatterns: [],
+    },
   };
 }
 
@@ -988,20 +1381,40 @@ async function planProject(prompt: string, mode: ModeConfig, onPing?: () => void
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function sortByPriority(files: FileSpec[]): FileSpec[] {
-  const PRIORITY = [
-    "src/utils/", "src/hooks/", "src/data/", "src/lib/",
-    "src/layouts/", "src/components/", "src/sections/",
-    "src/features/", "src/pages/", "src/App.jsx",
-  ];
+  const TIER_ORDER: FileTier[] = ["infrastructure", "layout", "page", "feature", "shared"];
   const app  = files.filter((f) => f.path === "src/App.jsx");
   const rest = files.filter((f) => f.path !== "src/App.jsx");
   return [
     ...rest.sort((a, b) => {
-      const rank = (p: string) => { const i = PRIORITY.findIndex((pre) => p.startsWith(pre) || p === pre); return i === -1 ? PRIORITY.length : i; };
-      return rank(a.path) - rank(b.path);
+      const tierA = TIER_ORDER.indexOf(getFileTier(a.path));
+      const tierB = TIER_ORDER.indexOf(getFileTier(b.path));
+      if (tierA !== tierB) return tierA - tierB;
+      return a.path.localeCompare(b.path);
     }),
     ...app,
   ];
+}
+
+function getFileTier(filePath: string): FileTier {
+  if (
+    filePath.includes("types/") ||
+    filePath.includes("utils") ||
+    filePath.includes("hooks/") ||
+    filePath.includes("data/") ||
+    filePath.includes("tailwind.config")
+  ) {
+    return "infrastructure";
+  }
+  if (filePath.includes("Layout") || filePath.includes("Navbar") || filePath.includes("Sidebar") || filePath.includes("Footer")) {
+    return "layout";
+  }
+  if (filePath.includes("pages/") || filePath.includes("Page")) {
+    return "page";
+  }
+  if (filePath.includes("components/") || filePath.includes("sections/") || filePath.includes("features/")) {
+    return "feature";
+  }
+  return "shared";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1064,13 +1477,40 @@ function buildAppJsx(spec: ProjectSpec, generatedFiles: StreamFile[], tokens: De
   `.trim();
 
   const renders = components.length > 0
-    ? components.map((c) => `      <${c.name} />`).join("\n")
+    ? components.map((c) => `      <ErrorBoundary key="${c.name}">
+        <${c.name} />
+      </ErrorBoundary>`).join("\n")
     : `      <div style={{ padding: '5rem 2rem', textAlign: 'center', color: '${tokens.text}' }}>
         <h1 style={{ fontSize: '3rem', fontWeight: 800, margin: '0 0 1rem', fontFamily: '${displayFont}' }}>${spec.projectName}</h1>
         <p style={{ color: '${tokens.textMuted}', fontSize: '1.1rem', margin: 0 }}>${spec.description}</p>
       </div>`;
 
+  const errorBoundaryClass = `class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: '2rem', background: '#1a1a2e', border: '1px solid #e11d48', borderRadius: '8px', margin: '1rem', color: '#f9fafb' }}>
+          <p style={{ fontWeight: 600, marginBottom: '0.5rem', color: '#fb7185' }}>Component Error</p>
+          <p style={{ fontSize: '0.8rem', color: '#9ca3af', fontFamily: 'monospace' }}>{this.state.error?.message}</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+`;
+
   return cleanOutput(`${imports}
+
+${errorBoundaryClass}
 
 function App() {
   useEffect(() => {
@@ -1100,7 +1540,12 @@ export default App;`);
 // SECTION 13 — CODEGEN PROMPTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function makeCodegenSystemPrompt(spec: ProjectSpec, tokens: DesignTokens, generatedSoFar: StreamFile[]): string {
+function makeCodegenSystemPrompt(
+  spec: ProjectSpec,
+  tokens: DesignTokens,
+  generatedSoFar: StreamFile[],
+  projectImages?: ProjectImages,
+): string {
   // ROOT FIX #7: Sanitize font strings for use inside JSX style={{}} values
   const displayFont = sanitizeFontString(tokens.displayFont);
   const bodyFont    = sanitizeFontString(tokens.bodyFont);
@@ -1113,6 +1558,14 @@ function makeCodegenSystemPrompt(spec: ProjectSpec, tokens: DesignTokens, genera
       return `  ${name} → '${relPath}'`;
     })
     .join("\n") || "  (none yet)";
+
+  const imageSection = projectImages?.contextBlock
+    ? `\n${projectImages.contextBlock}\n`
+    : `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IMAGES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+No image API keys available. Use gradients, solid colors, or SVG backgrounds for visual appeal.
+`;
 
   return `You are an elite React engineer building production-grade websites.
 Output ONLY raw file content. The VERY FIRST character of your response = first character of the file.
@@ -1160,7 +1613,7 @@ Stagger pattern:
   style={{ animation: 'fadeInUp 0.6s ${tokens.animEase} 0.0s both' }}
   style={{ animation: 'fadeInUp 0.6s ${tokens.animEase} 0.1s both' }}
   style={{ animation: 'fadeInUp 0.6s ${tokens.animEase} 0.2s both' }}
-
+${imageSection}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ALREADY GENERATED (importable)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1183,7 +1636,23 @@ ABSOLUTE RULES
 12. CRITICAL: fontFamily values must NOT contain unescaped quotes.
     WRONG: fontFamily: "'Syne', sans-serif"
     RIGHT: fontFamily: 'Syne, sans-serif'
-13. SVG CONSTRAINT: Never generate SVG path d attributes longer than 200 characters.
+13. PROP SAFETY: Every component that receives an object prop and accesses its properties MUST use optional chaining:
+    WRONG: function Card({ image }) { return <img src={image.src} /> }
+    RIGHT: function Card({ image = {} }) { return <img src={image?.src} /> }
+14. ARRAY PROP SAFETY: Every component that receives an array prop MUST default it to []:
+    WRONG: function Grid({ items }) { return items.map(...) }
+    RIGHT: function Grid({ items = [] }) { return (items || []).map(...) }
+15. APP.JSX RENDERING: Components rendered in App.jsx receive NO props from parent.
+    Every component must be fully self-contained with its own internal data/state.
+    NEVER design a component that requires props to be passed from App.jsx.
+    If a component needs data, define that data as a const INSIDE the component function.
+    Example:
+    WRONG: function ImageCard({ image }) { ... }  // requires prop from parent
+    RIGHT: function ImageGrid() {                  // self-contained
+      const images = [{ src: '...', alt: '...' }, ...];  // data defined internally
+      return images.map(img => <img key={img.src} src={img?.src} alt={img?.alt} />);
+    }
+16. SVG CONSTRAINT: Never generate SVG path d attributes longer than 200 characters.
     Use short paths or unicode characters for icons instead.
     WRONG: d="M0 0h16v16H0zM0 0h16v16H0zM0 0h16v16H0zM0 0h16v16H0z..." (repeating patterns)
     RIGHT: d="M0 0h16v16H0z" (short, simple)
@@ -1191,62 +1660,118 @@ ABSOLUTE RULES
 AVAILABLE PACKAGES: react@18, react-dom@18 — nothing else`;
 }
 
-function getComponentRoleInstructions(fileSpec: FileSpec, tokens: DesignTokens): string {
+function getComponentRoleInstructions(
+  fileSpec: FileSpec,
+  tokens: DesignTokens,
+  projectImages?: ProjectImages,
+): string {
   const displayFont = sanitizeFontString(tokens.displayFont);
   const bodyFont    = sanitizeFontString(tokens.bodyFont);
   const p = (fileSpec.path + " " + fileSpec.description).toLowerCase();
+
+  const { inlineHint, images } = projectImages
+    ? pickImagesForRole(fileSpec.path, fileSpec.description, projectImages)
+    : { inlineHint: "", images: [] };
+
+  const imageUsage = images && images.length
+    ? `Use these images (REQUIRED):\n${images.map((i: any) => i.url).join("\n")}`
+    : `Use fallback image:\n${resolveFallbackImage(`${fileSpec.path} ${fileSpec.description}`, tokens.projectType)}`;
+
+  const selfContainedDataRule = `SELF-CONTAINED DATA RULE:
+This component will be rendered as <ComponentName /> with NO props from parent.
+Define ALL data (images array, testimonials array, nav links, etc.) as const arrays INSIDE the component function body.
+Use optional chaining (?.) when accessing object properties.
+Use (array || []).map() for all array iterations.
+
+`;
+
+  const mandatoryImageRule = `MANDATORY IMAGE RULE:
+
+* This component MUST render at least one <img> tag
+* NEVER return empty UI without images
+* NEVER rely only on background images
+* ALWAYS use provided image URLs or fallback
+* Image must be visible in JSX
+
+${imageUsage}`;
 
   if (/nav|header|navbar/.test(p)) return `
 NAVBAR: Fixed top, z-index 1000. Logo (display font, gradient text) + nav links + CTA button.
 Glassmorphism: background '${tokens.glass}', backdropFilter 'blur(20px)', borderBottom '1px solid ${tokens.glassBorder}'.
 Mobile menu toggle with useState. Animate in with fadeInDown.
-FONT: fontFamily '${displayFont}' for logo, fontFamily '${bodyFont}' for links.`;
+FONT: fontFamily '${displayFont}' for logo, fontFamily '${bodyFont}' for links.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/hero/.test(p)) return `
 HERO: Full viewport height. Decorative blobs (absolute, blurred, animation 'blob 10s ease-in-out infinite').
 Eyebrow label. Heading (5xl+, display font, gradient text on key words). Subheading. Two CTA buttons.
 Staggered fadeInUp (delays: 0s, 0.15s, 0.3s, 0.45s).
-FONT: fontFamily '${displayFont}' for heading, fontFamily '${bodyFont}' for body.`;
+FONT: fontFamily '${displayFont}' for heading, fontFamily '${bodyFont}' for body.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/feature/.test(p)) return `
 FEATURES: 3 or 6 cards in CSS grid. Each: SVG icon in colored circle, title, description.
 Card hover lift (translateY -6px, shadowLg, border primary). Staggered fadeInUp.
-FONT: fontFamily '${displayFont}' for titles, fontFamily '${bodyFont}' for descriptions.`;
+FONT: fontFamily '${displayFont}' for titles, fontFamily '${bodyFont}' for descriptions.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/pricing/.test(p)) return `
 PRICING: 3 tiers (Starter/Pro/Enterprise). Featured tier: gradient border, scale(1.04).
 Monthly/Annual toggle with useState. Feature list with SVG checkmarks.
-FONT: fontFamily '${displayFont}' for prices and tier names.`;
+FONT: fontFamily '${displayFont}' for prices and tier names.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/testimonial|review/.test(p)) return `
 TESTIMONIALS: 3-4 cards. Each: quote text, avatar (gradient circle with initials), name, role, 5 stars.
 Glassmorphism cards. Hover lift. Stagger.
-FONT: fontFamily '${bodyFont}' for quotes, fontFamily '${displayFont}' for names.`;
+FONT: fontFamily '${bodyFont}' for quotes, fontFamily '${displayFont}' for names.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/stat|metric|number/.test(p)) return `
 STATS: 4-6 impressive numbers. Large (5xl+, display font, gradient text). Animated count-up (useState + useEffect).
-FONT: fontFamily '${displayFont}' for numbers.`;
+FONT: fontFamily '${displayFont}' for numbers.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/footer/.test(p)) return `
 FOOTER: Logo + tagline | navigation columns (3-4) | social SVG icons.
 Bottom bar: copyright + links. Real company copy.
-FONT: fontFamily '${displayFont}' for logo, fontFamily '${bodyFont}' for links.`;
+FONT: fontFamily '${displayFont}' for logo, fontFamily '${bodyFont}' for links.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/cta|call.to.action/.test(p)) return `
 CTA: High-impact. Gradient background. Centered heading + subtext + buttons. Animated blobs.
-FONT: fontFamily '${displayFont}' for heading.`;
+FONT: fontFamily '${displayFont}' for heading.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   if (/faq/.test(p)) return `
 FAQ: 6-8 items, accordion (useState). +/× SVG icon. Answer panel fades in.
-FONT: fontFamily '${bodyFont}'.`;
+FONT: fontFamily '${bodyFont}'.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 
   return `
 VISUAL COMPONENT: Premium quality matching ${tokens.projectType} archetype.
 Rich use of design tokens. Real interactivity with useState. Staggered animations. Real content.
-FONT: fontFamily '${displayFont}' for headings, fontFamily '${bodyFont}' for body.`;
+FONT: fontFamily '${displayFont}' for headings, fontFamily '${bodyFont}' for body.${inlineHint}
+
+${selfContainedDataRule}${mandatoryImageRule}`;
 }
 
-function makeFileUserPrompt(fileSpec: FileSpec, spec: ProjectSpec, tokens: DesignTokens, generatedSoFar: StreamFile[]): string {
+function makeFileUserPrompt(
+  fileSpec: FileSpec,
+  spec: ProjectSpec,
+  tokens: DesignTokens,
+  generatedSoFar: StreamFile[],
+  projectImages?: ProjectImages,
+): string {
   const displayFont = sanitizeFontString(tokens.displayFont);
   const bodyFont    = sanitizeFontString(tokens.bodyFont);
   const genMap      = new Map(generatedSoFar.map((f) => [f.path, f.content]));
@@ -1254,11 +1779,30 @@ function makeFileUserPrompt(fileSpec: FileSpec, spec: ProjectSpec, tokens: Desig
   const isHook      = /\/hooks?\//i.test(fileSpec.path);
   const isApp       = fileSpec.path === "src/App.jsx";
 
+  // Calculate relative import path from current file to target file
+  const getRelativePath = (from: string, to: string): string => {
+    const fromParts = from.split("/").slice(0, -1); // Remove filename
+    const toParts = to.replace(".jsx", "").split("/");
+    
+    // Count how many directories up we need to go
+    let commonLen = 0;
+    for (let i = 0; i < Math.min(fromParts.length, toParts.length); i++) {
+      if (fromParts[i] === toParts[i]) commonLen++;
+      else break;
+    }
+    
+    const ups = fromParts.length - commonLen;
+    const downs = toParts.slice(commonLen).join("/");
+    const rel = (ups > 0 ? "../".repeat(ups) : "./") + downs + ".jsx";
+    return rel;
+  };
+
   const depContext = (fileSpec.dependencies ?? [])
     .map((dep) => {
       const c = genMap.get(dep);
       if (!c) return null;
-      return `// ── DEP: ${dep} ──\n${c.split("\n").slice(0, 60).join("\n")}`;
+      const importPath = getRelativePath(fileSpec.path, dep);
+      return `// ── IMPORT: import ComponentName from '${importPath}' ──\n// ── CONTENT: ${dep} ──\n${c.split("\n").slice(0, 50).join("\n")}`;
     })
     .filter(Boolean)
     .join("\n\n");
@@ -1291,7 +1835,7 @@ ${isData ? "Use realistic, specific data — at least 6-8 items with real conten
 
     const imports = renderables.map((f) => {
       const name    = f.path.split("/").pop()!.replace(".jsx", "");
-      const relPath = "./" + f.path.replace(/^src\//, "").replace(".jsx", "") + ".jsx";
+      const relPath = getRelativePath(fileSpec.path, f.path);
       return `import ${name} from '${relPath}';`;
     }).join("\n");
     const renders = renderables.map((f) => `      <${f.path.split("/").pop()!.replace(".jsx", "")} />`).join("\n");
@@ -1324,7 +1868,7 @@ useEffect(() => {
   return () => { const s = document.getElementById('global-animations'); if (s) s.remove(); };
 }, []);`;
   } else {
-    const roleInstructions = getComponentRoleInstructions(fileSpec, tokens);
+    const roleInstructions = getComponentRoleInstructions(fileSpec, tokens, projectImages);
     task = `Write a COMPLETE, production-quality React component.
 ${roleInstructions}
 
@@ -1342,7 +1886,7 @@ Purpose: ${fileSpec.description}
 
 ${task}
 
-${depContext ? `━━━ DEPENDENCY CONTEXT ━━━\n${depContext}\n` : ""}
+${depContext ? `━━━ DEPENDENCY CONTEXT (with correct import paths) ━━━\n${depContext}\n` : ""}
 Start NOW. First char of response = first char of file. No explanation. No markdown.`;
 }
 
@@ -1358,26 +1902,28 @@ async function generateFile(
   tokens:         DesignTokens,
   generatedSoFar: StreamFile[],
   onPing?:        () => void,
-): Promise<{ file: StreamFile; succeeded: boolean }> {
+  projectImages?: ProjectImages,
+  onEvent?:       (event: PipelineStreamEvent) => void,
+): Promise<FileGenerationResult> {
   if (isCssFile(fileSpec.path)) {
     plog(`[S2] Skipping CSS file: ${fileSpec.path}`);
-    return { file: makeSafeComponent({ path: fileSpec.path.replace(/\.css$/, ".jsx"), content: "" }, tokens), succeeded: false };
+    return { file: makeSafeComponent({ path: fileSpec.path.replace(/\.css$/, ".jsx"), content: "" }, tokens), succeeded: false, retryCount: 0, status: "stubbed" };
   }
 
   const regens = _regenCount.get(fileSpec.path) ?? 0;
   if (regens >= MAX_REGEN_PER_FILE) {
     plog(`[S2] ${fileSpec.path} regen limit — safe fallback`);
-    return { file: makeSafeComponent({ path: fileSpec.path, content: "" }, tokens), succeeded: false };
+    return { file: makeSafeComponent({ path: fileSpec.path, content: "" }, tokens), succeeded: false, retryCount: regens, status: "stubbed" };
   }
 
   const models = codeHealth.getHealthy(CODEGEN_MODELS);
   if (models.length === 0) {
     perr(`[S2] All codegen models unhealthy for ${fileSpec.path}`);
-    return { file: makeSafeComponent({ path: fileSpec.path, content: "" }, tokens), succeeded: false };
+    return { file: makeSafeComponent({ path: fileSpec.path, content: "" }, tokens), succeeded: false, retryCount: 0, status: "failed" };
   }
 
-  const system     = makeCodegenSystemPrompt(spec, tokens, generatedSoFar);
-  const userPrompt = makeFileUserPrompt(fileSpec, spec, tokens, generatedSoFar);
+  const system     = makeCodegenSystemPrompt(spec, tokens, generatedSoFar, projectImages);
+  const userPrompt = makeFileUserPrompt(fileSpec, spec, tokens, generatedSoFar, projectImages);
 
   for (let mi = 0; mi < models.length; mi++) {
     const model = models[mi];
@@ -1450,7 +1996,7 @@ async function generateFile(
 
         _regenCount.delete(fileSpec.path);
         plog(`[S2] ✓ ${fileSpec.path} (${content.length}c, ${latencyMs}ms)`);
-        return { file: { path: fileSpec.path, content }, succeeded: true };
+        return { file: { path: fileSpec.path, content }, succeeded: true, retryCount: attempt, status: "success" };
 
       } catch (e: unknown) {
         clearTimeout(timeout);
@@ -1459,8 +2005,10 @@ async function generateFile(
         const msg    = (e as Error)?.message ?? String(e);
         if (status === 401 || status === 403) {
           perr(`[S2] Auth error`);
-          return { file: makeSafeComponent({ path: fileSpec.path, content: "" }, tokens), succeeded: false };
+          emitGenerationError(onEvent, e, fileSpec.path, attempt + 1);
+          return { file: makeSafeComponent({ path: fileSpec.path, content: "" }, tokens), succeeded: false, retryCount: attempt, status: "failed" };
         }
+        emitGenerationError(onEvent, e, fileSpec.path, attempt + 1);
         plog(`[S2] ${mlabel(model)} ${fileSpec.path} attempt ${attempt + 1} failed: ${msg}`);
         if (attempt < MAX_FILE_RETRIES - 1) await sleepPing(backoff(attempt), onPing);
       }
@@ -1472,7 +2020,7 @@ async function generateFile(
   // ROOT FIX #5: Return safe fallback AND track that it failed — caller can decide
   perr(`[S2] All models failed for ${fileSpec.path} — safe fallback`);
   _regenCount.set(fileSpec.path, regens + 1);
-  return { file: makeSafeComponent({ path: fileSpec.path, content: "" }, tokens), succeeded: false };
+  return { file: makeSafeComponent({ path: fileSpec.path, content: "" }, tokens), succeeded: false, retryCount: MAX_FILE_RETRIES, status: "stubbed" };
 }
 
 async function generateAllFiles(
@@ -1480,10 +2028,14 @@ async function generateAllFiles(
   tokens:    DesignTokens,
   smartEmit: (f: StreamFile) => Promise<void>,
   onPing?:   () => void,
+  projectImages?: ProjectImages,
+  onEvent?:  (event: PipelineStreamEvent) => void,
 ): Promise<StreamFile[]> {
   const sorted      = sortByPriority(spec.files);
   const nonAppSpecs = sorted.filter((f) => f.path !== "src/App.jsx");
   const generated:  StreamFile[] = [];
+  const fileResults: Array<{ path: string; status: FileGenerationStatus; chars: number; retryCount: number }> = [];
+  const generationStartTime = Date.now();
   let   failCount   = 0;
 
   for (let i = 0; i < nonAppSpecs.length; i += PARALLEL_BATCH_SIZE) {
@@ -1491,12 +2043,13 @@ async function generateAllFiles(
     plog(`[S2] Batch ${Math.floor(i / PARALLEL_BATCH_SIZE) + 1}: ${batch.map((s) => s.path).join(", ")}`);
 
     const results = await Promise.all(
-      batch.map((fs) => generateFile(fs, spec, tokens, generated, onPing))
+      batch.map((fs) => generateFile(fs, spec, tokens, generated, onPing, projectImages, onEvent))
     );
 
-    for (const { file, succeeded } of results) {
+    for (const { file, succeeded, retryCount, status } of results) {
       if (!succeeded) failCount++;
       generated.push(file);
+      fileResults.push({ path: file.path, status, chars: file.content.length, retryCount });
       await smartEmit({ ...file, provisional: true });
     }
 
@@ -1513,9 +2066,28 @@ async function generateAllFiles(
     content: buildAppJsx(spec, generated, tokens),
   };
   generated.push(deterministicApp);
+  fileResults.push({ path: deterministicApp.path, status: "success", chars: deterministicApp.content.length, retryCount: 0 });
   await smartEmit({ ...deterministicApp, provisional: true });
 
   plog(`[S2] ✓ Generated ${generated.length} files (${failCount} failures used safe fallback)`);
+  onEvent?.({
+    type: "GENERATION_COMPLETE",
+    stats: {
+      totalFiles: generated.length,
+      successCount: fileResults.filter((f) => f.status === "success").length,
+      retryCount: fileResults.filter((f) => f.retryCount > 0).length,
+      stubbedCount: fileResults.filter((f) => f.status === "stubbed").length,
+      failedCount: fileResults.filter((f) => f.status === "failed").length,
+      totalChars: generated.reduce((sum, file) => sum + file.content.length, 0),
+      elapsedMs: Date.now() - generationStartTime,
+    },
+    files: fileResults.map((f) => ({
+      path: f.path,
+      status: f.status,
+      chars: f.chars,
+      retries: f.retryCount,
+    })),
+  });
   return generated;
 }
 
@@ -1540,6 +2112,90 @@ function fixUseEffectDeps(content: string): string {
     .replace(/\buseEffect\s*\(\s*(function\s*\(\s*\)\s*\{(?:[^{}]|\{[^{}]*\})*\})\s*\)(?!\s*,)/g, (_, fn) => `useEffect(${fn}, [])`);
 }
 
+function applyPropSafetyFixes(content: string, filePath: string): string {
+  let result = content;
+
+  // FIX 1: Add default values to destructured object props in function signatures
+  // Pattern: function Name({ propName }) → function Name({ propName = {} })
+  // Pattern: function Name({ propName, other }) → function Name({ propName = {}, other = {} })
+  // BUT: skip props that already have defaults (= something)
+  // AND: skip props named children, className, style, key, ref (these are special)
+  const SKIP_PROPS = new Set(['children', 'className', 'style', 'key', 'ref', 'id']);
+  
+  result = result.replace(
+    /function\s+([A-Z][a-zA-Z0-9]*)\s*\(\s*\{([^}]+)\}\s*(?:=\s*\{\})?\s*\)/g,
+    (match, funcName, paramsStr) => {
+      const params = paramsStr.split(',').map((p: string) => p.trim()).filter(Boolean);
+      const fixedParams = params.map((param: string) => {
+        // Already has a default value
+        if (param.includes('=')) return param;
+        // Get just the param name (handle rename: alias: name)
+        const paramName = param.includes(':') ? param.split(':')[0].trim() : param.trim();
+        // Skip special props
+        if (SKIP_PROPS.has(paramName)) return param;
+        // Add safe default based on name heuristics
+        if (/items?|list|data|cards?|images?|photos?|posts?|products?|results?|entries|rows?/i.test(paramName)) {
+          return `${param} = []`;
+        }
+        return `${param} = {}`;
+      });
+      return `function ${funcName}({ ${fixedParams.join(', ')} })`;
+    }
+  );
+
+  // Same fix for arrow function components: const Name = ({ propName }) =>
+  result = result.replace(
+    /const\s+([A-Z][a-zA-Z0-9]*)\s*=\s*\(\s*\{([^}]+)\}\s*(?:=\s*\{\})?\s*\)\s*=>/g,
+    (match, funcName, paramsStr) => {
+      const params = paramsStr.split(',').map((p: string) => p.trim()).filter(Boolean);
+      const fixedParams = params.map((param: string) => {
+        if (param.includes('=')) return param;
+        const paramName = param.includes(':') ? param.split(':')[0].trim() : param.trim();
+        if (SKIP_PROPS.has(paramName)) return param;
+        if (/items?|list|data|cards?|images?|photos?|posts?|products?|results?|entries|rows?/i.test(paramName)) {
+          return `${param} = []`;
+        }
+        return `${param} = {}`;
+      });
+      return `const ${funcName} = ({ ${fixedParams.join(', ')} }) =>`;
+    }
+  );
+
+  // FIX 2: Wrap unsafe .map() calls
+  // Pattern: someVar.map( where someVar is NOT already wrapped in (someVar || [])
+  result = result.replace(
+    /(?<!\|\|\s*\[\]\s*\)\.|\?\s*)((?:[a-zA-Z_$][a-zA-Z0-9_$]*\.)*[a-zA-Z_$][a-zA-Z0-9_$]*)\.map\s*\(/g,
+    (match, varPath) => {
+      // Skip if already safe patterns
+      if (match.startsWith('(') || varPath === 'Array' || varPath === 'Object') return match;
+      return `(${varPath} || []).map(`;
+    }
+  );
+
+  // FIX 3: Wrap unsafe .filter() calls similarly
+  result = result.replace(
+    /(?<!\|\|\s*\[\]\s*\)\.|\?\s*)((?:[a-zA-Z_$][a-zA-Z0-9_$]*\.)*[a-zA-Z_$][a-zA-Z0-9_$]*)\.filter\s*\(/g,
+    (match, varPath) => {
+      if (match.startsWith('(') || varPath === 'Array' || varPath === 'Object') return match;
+      return `(${varPath} || []).filter(`;
+    }
+  );
+
+  // FIX 4: Add optional chaining to common property access patterns on props
+  // Pattern: propName.src → propName?.src (when propName is a known object prop name)
+  // Only apply inside JSX attribute values: src={image.src} → src={image?.src}
+  result = result.replace(
+    /(\{)\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\.(src|href|url|title|name|alt|label|text|description|id|value|content|path)\s*(\})/g,
+    (match, open, varName, prop, close) => {
+      // Skip if already using optional chaining
+      if (match.includes('?.')) return match;
+      return `${open}${varName}?.${prop}${close}`;
+    }
+  );
+
+  return result;
+}
+
 function deterministicFixPass(files: StreamFile[]): StreamFile[] {
   return files.map((file) => {
     if (BOILERPLATE_PATHS.has(file.path)) return file;
@@ -1562,6 +2218,7 @@ function deterministicFixPass(files: StreamFile[]): StreamFile[] {
     if (file.path.endsWith(".jsx")) c = fixJsxImbalance(c);
     c = deduplicateImports(c);
     c = fixTokenCorruption(c);
+    if (file.path.endsWith(".jsx")) c = applyPropSafetyFixes(c, file.path);
     c = cleanOutput(c);
 
     return { ...file, content: c };
@@ -1572,6 +2229,20 @@ function deterministicFixPass(files: StreamFile[]): StreamFile[] {
 // SECTION 16 — EMIT HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Determines if a file should have its image URLs sanitized
+ * Sanitization applies to files that may contain HTML/JSX with image elements
+ */
+function shouldSanitizeFile(path: string): boolean {
+  // Sanitize JSX, HTML, and JS files, but not CSS or config files
+  const sanitizableExtensions = ['.jsx', '.js', '.html', '.tsx', '.ts'];
+  const isConfigFile = path.includes('vite.config') || path.includes('tailwind') || path.includes('postcss');
+  
+  if (isConfigFile) return false;
+  
+  return sanitizableExtensions.some(ext => path.endsWith(ext));
+}
+
 async function smartEmitFile(
   file:    StreamFile,
   onFile:  (f: StreamFile) => Promise<void>,
@@ -1579,7 +2250,7 @@ async function smartEmitFile(
   tokens:  DesignTokens,
 ): Promise<void> {
   if (isCssFile(file.path)) { plog(`[EMIT] CSS dropped: ${file.path}`); return; }
-
+ 
   let toEmit = file;
   if (!BOILERPLATE_PATHS.has(file.path) && file.path.endsWith(".jsx")) {
     const v = validateFile(file);
@@ -1588,12 +2259,24 @@ async function smartEmitFile(
       toEmit = makeSafeComponent(file, tokens);
     }
   }
-
-  if (emitted.get(toEmit.path) === toEmit.content) return;
+  
+  // Sanitize images in generated code to work with COEP/iframe restrictions
+  if (shouldSanitizeFile(toEmit.path)) {
+    toEmit = {
+      ...toEmit,
+      content: sanitizeOutput(toEmit.content, toEmit.path),
+    };
+  }
+ 
+  const isFinal = toEmit.provisional === false;
+ 
+  // For provisional emits: skip if content unchanged (avoid redundant client updates)
+  // For final emits: ALWAYS call onFile — this is what gets saved to DB
+  if (!isFinal && emitted.get(toEmit.path) === toEmit.content) return;
+ 
   emitted.set(toEmit.path, toEmit.content);
   try { await onFile(toEmit); } catch (e) { perr(`[EMIT] onFile threw for ${toEmit.path}: ${String(e)}`); }
 }
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 17 — MAIN PIPELINE EXPORT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1602,7 +2285,7 @@ export async function streamProjectPipeline(
   prompt:    string,
   callbacks: PipelineCallbacks,
 ): Promise<void> {
-  const { onFile, onDone, onError, onLog, onPing } = callbacks;
+  const { onFile, onDone, onError, onLog, onPing, onEvent } = callbacks;
 
   _log = (msg: string) => { console.log(msg); onLog?.(msg); };
   _regenCount.clear();
@@ -1613,7 +2296,8 @@ export async function streamProjectPipeline(
 
   // ── Detect complexity mode FIRST ─────────────────────────────────────────
   const mode   = detectComplexityMode(prompt);
-  const tokens = resolveDesignTokens(prompt, "");
+  let tokens = resolveDesignTokens(prompt, "");
+  const session = sessionLogger.start(prompt, tokens.projectType);
 
   const smartEmit = (f: StreamFile) =>
     smartEmitFile(f, onFile, emittedContent, tokens);
@@ -1657,16 +2341,34 @@ export async function streamProjectPipeline(
 
   // Update tokens with planner's primary color suggestion (if valid hex)
   if (spec.primaryColor && /^#[0-9A-Fa-f]{6}$/.test(spec.primaryColor)) {
-    tokens.primary = spec.primaryColor;
+    tokens = applyPalette(tokens, {
+      primary: spec.primaryColor,
+      primaryLight: mixHex(spec.primaryColor, "#ffffff", 0.35),
+      accent: mixHex(spec.primaryColor, tokens.bg.startsWith("#0") ? "#ffffff" : "#111111", 0.2),
+    });
   }
 
   plog(`[S1] ✓ ${spec.files.length} files planned for "${spec.projectName}"`);
+
+  // ── Stage 1.5: Resolve images (optional, non-fatal enhancement) ─────────
+  plog("[S1.5] Fetching project images...");
+  let projectImages: ProjectImages | undefined;
+  try {
+    projectImages = await resolveProjectImages(prompt, tokens.projectType, {
+      unsplashKey: process.env.VITE_UNSPLASH_ACCESS_KEY,
+      pexelsKey: process.env.VITE_PEXELS_API_KEY,
+    });
+    plog("[S1.5] ✓ Images resolved");
+  } catch (e) {
+    plog("[S1.5] Image fetch failed (non-fatal) — continuing with gradients");
+    projectImages = undefined;
+  }
 
   // ── Stage 2: Generate all files (ROOT FIX #5: failure-tracked) ───────────
   plog(`[S2] Generating ${spec.files.length} files...`);
   let generatedFiles: StreamFile[] = [];
   try {
-    generatedFiles = await generateAllFiles(spec, tokens, smartEmit, onPing);
+    generatedFiles = await generateAllFiles(spec, tokens, smartEmit, onPing, projectImages, onEvent);
     plog(`[S2] ✓ ${generatedFiles.length} files generated`);
   } catch (e) {
     perr(`[S2] Fatal error: ${String(e)}`);
@@ -1682,7 +2384,7 @@ export async function streamProjectPipeline(
 
   // ── Stage 3.5: Hard validation gate (ROOT FIX #8: real gate) ─────────────
   plog("[S3.5] Validation gate...");
-  fixedFiles = applyValidationGate(fixedFiles, tokens);
+  fixedFiles = applyValidationGate(fixedFiles, tokens, projectImages);
   plog(`[S3.5] ✓ ${fixedFiles.length} files passed gate`);
 
   // ── ROOT FIX #4: Structural integrity check — required files must be present ──
@@ -1745,5 +2447,9 @@ export async function streamProjectPipeline(
   plog(`✅ PIPELINE v21.0 DONE — ${fixedFiles.length} files, mode: ${mode.mode}, type: ${tokens.projectType}`);
   plog("✅ ══════════════════════════════════════════════════════════");
 
+  session.fileCount = fixedFiles.length;
+  session.successCount = fixedFiles.length;
+  session.failedCount = 0;
+  sessionLogger.complete(session);
   safeDone();
 }

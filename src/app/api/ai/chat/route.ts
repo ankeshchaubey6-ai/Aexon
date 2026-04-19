@@ -40,7 +40,6 @@ export async function POST(req: NextRequest) {
         where: { id: existingProjectId, subAccountId },
         select: { id: true },
       });
-
       project = found
         ? found
         : await db.aIProject.create({
@@ -57,6 +56,10 @@ export async function POST(req: NextRequest) {
     // ── SSE STREAM ───────────────────────────────────────
     const encoder = new TextEncoder();
     let isClosed = false;
+
+    // Track all final (non-provisional) files for a single bulk upsert at done.
+    // This avoids per-file DB round trips and ensures atomicity.
+    const finalFiles = new Map<string, string>(); // path → content
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -96,32 +99,24 @@ export async function POST(req: NextRequest) {
               onFile: async (file: StreamFile) => {
                 if (isClosed) return;
 
-                // Prevent empty/corrupt writes
-                if (!file.content || file.content.length < 10) {
-                  return;
-                }
+                // FIX: Remove the `provisional` guard. The pipeline's smartEmitFile
+                // deduplicates by content — if a file's content didn't change between
+                // the provisional S2 emit and the final S4 emit, onFile is never called
+                // with provisional=false. This means boilerplate files (package.json,
+                // index.html, src/main.jsx) whose content is stable across stages were
+                // never saved to DB. Saving on every onFile call is safe because:
+                //   1. The pipeline controls emission (dedup map prevents redundant calls)
+                //   2. We do a final bulk upsert at done anyway
+                //   3. Provisional files will be overwritten if a final version arrives
 
-                if (!(file as any).provisional) {
-                  await db.aIProjectFile.upsert({
-                    where: {
-                      projectId_path: {
-                        projectId: project.id,
-                        path: file.path,
-                      },
-                    },
-                    update: { content: file.content },
-                    create: {
-                      projectId: project.id,
-                      path: file.path,
-                      content: file.content,
-                    },
-                  });
-                }
-
+                // Stream the file to client immediately
                 send({
                   type: "file",
                   file: { path: file.path, content: file.content },
                 });
+
+                // Collect for bulk save — last write wins (correct behavior)
+                finalFiles.set(file.path, file.content);
               },
 
               onLog: (message: string) => {
@@ -130,7 +125,58 @@ export async function POST(req: NextRequest) {
 
               onPing: ping,
 
-              onDone: () => {
+              onDone: async () => {
+                // ── Bulk upsert ALL collected files at pipeline completion ──
+                // This is the single source of truth for what gets persisted.
+                const filesToSave = Array.from(finalFiles.entries()).map(
+                  ([path, content]) => ({ path, content })
+                );
+
+                console.log(
+                  `[chat/route] onDone — saving ${filesToSave.length} files to DB for project ${project.id}`
+                );
+                filesToSave.forEach((f) => console.log(`  - ${f.path}`));
+
+                if (filesToSave.length > 0) {
+                  try {
+                    await db.$transaction(
+                      filesToSave.map((file) =>
+                        db.aIProjectFile.upsert({
+                          where: {
+                            projectId_path: {
+                              projectId: project.id,
+                              path: file.path,
+                            },
+                          },
+                          update: { content: file.content },
+                          create: {
+                            projectId: project.id,
+                            path: file.path,
+                            content: file.content,
+                          },
+                        })
+                      )
+                    );
+
+                    // Verify
+                    const count = await db.aIProjectFile.count({
+                      where: { projectId: project.id },
+                    });
+                    console.log(
+                      `[chat/route] ✅ Saved. DB now has ${count} files (expected: ${filesToSave.length})`
+                    );
+                    if (count !== filesToSave.length) {
+                      console.warn(
+                        `[chat/route] ⚠️ Mismatch: saved ${filesToSave.length}, DB shows ${count}`
+                      );
+                    }
+                  } catch (dbErr) {
+                    console.error("[chat/route] ❌ DB save failed:", dbErr);
+                  }
+                } else {
+                  console.error("[chat/route] ❌ No files collected — nothing to save");
+                }
+
                 send({ type: "done", projectId: project.id });
                 close();
               },
@@ -155,7 +201,7 @@ export async function POST(req: NextRequest) {
           ]);
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Generation failed";
-          console.error("❌ [Route] Pipeline error:", msg);
+          console.error("❌ [chat/route] Pipeline error:", msg);
           send({ type: "error", message: msg });
           close();
         }
@@ -174,7 +220,7 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (err) {
-    console.error("❌ [Route] Request error:", err);
+    console.error("❌ [chat/route] Request error:", err);
     return new Response(
       JSON.stringify({ error: "Internal server error" }),
       { status: 500, headers: { "Content-Type": "application/json" } }

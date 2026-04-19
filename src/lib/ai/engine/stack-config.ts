@@ -115,7 +115,7 @@ RULES (enforced):
 
 export const VALIDATOR_RULES = `
 Fix ONLY syntax errors:
-- Unclosed JSX tags
+- Unclosed JSX tagsw
 - Missing export default
 - Missing React import (import React from 'react')
 - Unbalanced braces or parentheses

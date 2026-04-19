@@ -1,84 +1,87 @@
 "use client";
 
-import { useState } from "react";
+import React from "react";
+import { Send, Loader2, StopCircle } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 
-type Props = {
-  subAccountId: string;
-  addFileToState: (file: { path: string; content: string }) => void;
-};
+interface ChatInputProps {
+  value: string;
+  onChange: (value: string) => void;
+  onSend: () => void;
+  onCancel?: () => void;
+  isLoading?: boolean;
+  placeholder?: string;
+  disabled?: boolean;
+}
 
-const ChatInput = ({ subAccountId, addFileToState }: Props) => {
-  const [value, setValue] = useState("");
-  const [loading, setLoading] = useState(false);
+const ChatInput: React.FC<ChatInputProps> = ({
+  value,
+  onChange,
+  onSend,
+  onCancel,
+  isLoading,
+  placeholder = "Describe your app...",
+  disabled,
+}) => {
+  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
 
-  const handleSend = async () => {
-    if (!value.trim() || loading) return;
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    onChange(e.target.value);
+    e.target.style.height = "auto";
+    e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
+  };
 
-    setLoading(true);
-
-    try {
-      const res = await fetch("/api/ai/chat", {
-        method: "POST",
-        body: JSON.stringify({
-          prompt: value,
-          subAccountId,
-        }),
-      });
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No stream");
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value: chunk } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(chunk, { stream: true });
-
-        const parts = buffer.split("\n\n");
-
-        for (const part of parts) {
-          if (!part.startsWith("data:")) continue;
-
-          const json = part.replace("data: ", "");
-          const data = JSON.parse(json);
-
-          if (data.type === "file") {
-            addFileToState(data.file);
-          }
-
-          if (data.type === "done") {
-            setLoading(false);
-          }
-        }
-
-        buffer = parts[parts.length - 1];
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (value.trim() && !isLoading) {
+        onSend();
       }
-    } catch (err) {
-      console.error(err);
-      setLoading(false);
     }
-
-    setValue("");
   };
 
   return (
-    <div className="mt-auto flex gap-2">
-      <input
+    <div className="flex items-end gap-2 rounded-xl border border-border bg-background px-3 py-2 focus-within:ring-1 focus-within:ring-ring transition-all">
+      <Textarea
+        ref={textareaRef}
+        rows={1}
         value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="Describe your app..."
-        className="flex-1 border rounded px-3 py-2 text-sm"
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        disabled={disabled || isLoading}
+        placeholder={placeholder}
+        className="flex-1 resize-none text-sm bg-transparent outline-none placeholder:text-muted-foreground disabled:opacity-50 min-h-[24px] max-h-[120px] p-0 border-0 focus-visible:ring-0"
       />
-      <button
-        onClick={handleSend}
-        disabled={loading}
-        className="px-4 py-2 bg-primary text-white rounded"
-      >
-        {loading ? "..." : "Send"}
-      </button>
+      {isLoading ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="shrink-0 h-7 w-7"
+          onClick={onCancel}
+        >
+          <StopCircle className="h-4 w-4" />
+        </Button>
+      ) : (
+        <Button
+          size="icon"
+          className={cn(
+            "shrink-0 h-7 w-7 rounded-lg transition-all",
+            value.trim()
+              ? "bg-primary text-primary-foreground hover:opacity-90"
+              : "bg-muted text-muted-foreground opacity-50 cursor-not-allowed"
+          )}
+          onClick={onSend}
+          disabled={!value.trim()}
+        >
+          {isLoading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Send className="h-3.5 w-3.5" />
+          )}
+        </Button>
+      )}
     </div>
   );
 };

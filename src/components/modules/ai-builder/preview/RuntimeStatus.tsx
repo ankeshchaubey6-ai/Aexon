@@ -8,7 +8,7 @@ const RuntimeStatus: React.FC = () => {
   const { status } = useWebContainer();
 
   const color =
-    status === "ready"
+    status === "running"
       ? "text-green-600"
       : status === "booting"
       ? "text-yellow-600"
