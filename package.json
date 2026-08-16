@@ -98,6 +98,8 @@
     "esbuild-wasm": "^0.18.20",
     "eslint": "^8",
     "eslint-config-next": "14.2.25",
+    "glob": "^13.0.6",
+    "globby": "^11.1.0",
     "postcss": "^8",
     "prettier": "^3.2.5",
     "prisma": "^5.22.0",

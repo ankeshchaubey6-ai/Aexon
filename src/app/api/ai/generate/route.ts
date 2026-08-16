@@ -1,11 +1,7 @@
 // src/app/api/ai/generate/route.ts
 //
-// FIX: The original code used `crypto.randomUUID()` as `projectId` for both
-// SSE events AND the DB upsert, but `dbProject.id` is the actual FK-anchored
-// DB record. Files saved under the random UUID were orphaned — they had no
-// parent AIProject row, so getAIProjectById returned 0 files on reload.
-//
-// Fix: remove the random `projectId` entirely. Use `dbProject.id` everywhere.
+// OPUS AI Builder Integration: Uses 10-step pipeline with component pool
+// Automatically resolves components from registry instead of generating from scratch
 
 import { NextRequest } from "next/server";
 import { currentUser } from "@clerk/nextjs/server";
@@ -13,9 +9,9 @@ import { Role } from "@prisma/client";
 
 import { getAuthUserDetails } from "@/queries/auth";
 import { createAIProject, upsertAIProjectFiles } from "@/queries/ai-projects";
-import { streamProjectPipeline } from "@/lib/ai/stream/stream-pipeline";
 import { db } from "@/lib/db";
 import { AIFileNode } from "@/lib/ai/types/ai-project.types";
+import { inngest } from "@/inngest/client";
 
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
@@ -95,7 +91,6 @@ export async function POST(req: NextRequest) {
   }
 
   // ───────────── SSE STREAM ─────────────
-  const allFiles: AIFileNode[] = [];
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -121,101 +116,133 @@ export async function POST(req: NextRequest) {
         // FIX: Emit the real DB project ID so the client URL and store use it.
         send({
           type: "project_init",
-          projectId: dbProject.id,    // ← was a random UUID before
+          projectId: dbProject.id,
           dbProjectId: dbProject.id,
           name: name || prompt.slice(0, 50),
         });
 
-        await streamProjectPipeline(prompt, {
-          onFile: async (file) => {
-            const safeFile = file;
-            const existing = allFiles.findIndex((f) => f.path === safeFile.path);
-            const node: AIFileNode = {
-              path: safeFile.path,
-              content: safeFile.content,
-              type: "file",
-            };
-            if (existing >= 0) {
-              allFiles[existing] = node;
-            } else {
-              allFiles.push(node);
-            }
+        // ═══════════════════════════════════════════════════════════════
+        // OPUS AI Builder: 10-Step Pipeline with Component Pool
+        // ═══════════════════════════════════════════════════════════════
 
-            send({
-              type: "file",
-              path: safeFile.path,
-              content: safeFile.content,
-              provisional: safeFile.provisional ?? false,
-              size: safeFile.content.length,
-            });
-          },
+        send({
+          type: "log",
+          message: "🚀 Triggering OPUS AI Builder (10-step pipeline)...",
+        });
 
-          onLog: (message) => {
-            send({ type: "log", message });
-          },
-
-          onError: (message) => {
-            send({ type: "error", message });
-          },
-
-          onPing: ping,
-
-          onDone: () => {
-            console.log(`✅ Pipeline completed for project ${dbProject.id}`);
+        // Trigger the OPUS Inngest pipeline
+        await inngest.send({
+          name: "ai/build",
+          data: {
+            prompt,
+            projectId: dbProject.id,
+            subaccountId,
           },
         });
 
-        // ── LOG: Show all collected files before saving ──
-        console.log(`[SAVE] Collected ${allFiles.length} files for project ${dbProject.id}:`);
-        allFiles.forEach((f) => console.log(`  - ${f.path} (${f.content.length} bytes)`));
+        send({
+          type: "log",
+          message: "⏳ OPUS pipeline started. Processing with component pool...",
+        });
 
-        // ── Warn on missing required boilerplate ──
-        const REQUIRED_FILES = ["package.json", "index.html", "src/main.jsx", "src/App.jsx"];
-        const missingRequired = REQUIRED_FILES.filter((r) => !allFiles.find((f) => f.path === r));
-        if (missingRequired.length > 0) {
-          console.warn(`⚠️ MISSING REQUIRED FILES: ${missingRequired.join(", ")}`);
-        }
+        // ─────────────────────────────────────────────────────
+        // Poll for completion (max 60 seconds)
+        // ─────────────────────────────────────────────────────
 
-        // ── FIX: Save files under dbProject.id (the FK-anchored row) ──
-        if (allFiles.length > 0) {
-          try {
-            await upsertAIProjectFiles(dbProject.id, allFiles);
-            console.log(`✅ Saved ${allFiles.length} files to DB under project ${dbProject.id}`);
+        let completed = false;
+        let attempts = 0;
+        const maxAttempts = 120; // 2 min with 1s polling
 
-            const verify = await db.aIProjectFile.count({ where: { projectId: dbProject.id } });
-            console.log(`   DB verification: ${verify} files (expected: ${allFiles.length})`);
-            if (verify !== allFiles.length) {
-              console.error(`   ❌ MISMATCH: saved ${allFiles.length}, DB shows ${verify}`);
-            }
-          } catch (dbErr) {
-            console.error("⚠️ DB save failed:", dbErr);
+        while (!completed && attempts < maxAttempts) {
+          // Check if files have been persisted by OPUS
+          const fileCount = await db.aIProjectFile.count({
+            where: { projectId: dbProject.id },
+          });
+
+          if (fileCount > 0) {
+            send({
+              type: "log",
+              message: `✓ OPUS generated ${fileCount} files (component pool + custom)`,
+            });
+            completed = true;
+            break;
           }
-        } else {
-          console.error("❌ NO FILES COLLECTED — nothing to save");
+
+          await new Promise((r) => setTimeout(r, 500)); // Wait 500ms before retry
+          attempts++;
+
+          if (attempts % 20 === 0) {
+            ping(); // Keep connection alive
+          }
         }
 
-        // FIX: Send the real dbProject.id in the done event so the client
-        // store and URL both reflect the correct project ID.
-        send({ type: "done", fileCount: allFiles.length, projectId: dbProject.id });
+        if (!completed) {
+          send({
+            type: "log",
+            message: "⚠️ OPUS pipeline timeout. Files may be processing in background.",
+          });
+        }
 
+        // ─────────────────────────────────────────────────────
+        // Retrieve generated files from database
+        // ─────────────────────────────────────────────────────
+
+        const allFiles: AIFileNode[] = [];
+        const generatedFiles = await db.aIProjectFile.findMany({
+          where: { projectId: dbProject.id },
+          select: { path: true, content: true },
+        });
+
+        for (const file of generatedFiles) {
+          const node: AIFileNode = {
+            path: file.path,
+            content: file.content,
+            type: "file",
+          };
+          allFiles.push(node);
+
+          send({
+            type: "file",
+            path: file.path,
+            content: file.content,
+            provisional: false,
+            size: file.content.length,
+          });
+        }
+
+        console.log(
+          `[OPUS] Completed for project ${dbProject.id}. Generated ${allFiles.length} files from pool`
+        );
+
+        send({
+          type: "done",
+          fileCount: allFiles.length,
+          projectId: dbProject.id,
+          method: "opus-pool",
+        });
       } catch (err) {
-        const msg = (err as Error)?.message ?? "Generation failed";
-        console.error("❌ [generate/stream] crash:", msg);
+        const msg = (err as Error)?.message ?? "OPUS generation failed";
+        console.error("❌ [generate/opus] crash:", msg);
         send({ type: "error", message: msg });
 
+        // Fallback: Generate basic files if OPUS fails
         const fallback = makeFallbackFiles(prompt);
         for (const f of fallback) {
-          send({ type: "file", path: f.path, content: f.content, provisional: false });
+          send({ type: "file", path: f.path, content: f.content, provisional: true });
         }
 
-        // Save fallback files under the real project ID too
         try {
           await upsertAIProjectFiles(dbProject.id, fallback);
         } catch (dbErr) {
           console.error("⚠️ Fallback DB save failed:", dbErr);
         }
 
-        send({ type: "done", fileCount: fallback.length, projectId: dbProject.id, fallback: true });
+        send({
+          type: "done",
+          fileCount: fallback.length,
+          projectId: dbProject.id,
+          fallback: true,
+        });
       } finally {
         clearInterval(heartbeat);
         controller.close();

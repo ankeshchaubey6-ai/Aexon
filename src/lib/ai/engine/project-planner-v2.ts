@@ -61,8 +61,9 @@ export interface ModeConfig {
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
 
 const PLAN_MODELS = [
-  "moonshotai/kimi-k2-instruct",
-  "mistralai/mistral-large-3-675b-instruct-2512",
+  "mistralai/mistral-nemotron",
+  "minimaxai/minimax-m2.7",
+  "stepfun-ai/step-3.5-flash",
   "meta/llama-4-maverick-17b-128e-instruct",
 ] as const;
 
@@ -513,6 +514,13 @@ Plan the project. Return ONLY the JSON object.`,
 
       const status = (e as { status?: number })?.status ?? 0;
       const msg    = (e as Error)?.message ?? String(e);
+
+      if (status === 410) {
+        // Model is gone/deprecated — instantly mark unhealthy, don't retry
+        for (let i = 0; i < FAILURE_THRESHOLD; i++) recordFailure(model);
+        console.warn(`[planProjectV2] Model ${mlabel(model)} returned 410 Gone — skipping permanently`);
+        continue;
+      }
 
       if (status === 401 || status === 403) {
         console.error("[planProjectV2] Auth error — cannot continue");

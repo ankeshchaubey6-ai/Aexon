@@ -7,8 +7,10 @@ import type { StreamFile } from "@/lib/ai/stream/stream-pipeline";
 
 const GENERATION_TIMEOUT_MS = 30 * 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 8_000;
+const inFlightProjects = new Map<string, boolean>();
 
 export async function POST(req: NextRequest) {
+  let projectIdForLock: string | null = null;
   try {
     const body = await req.json();
     const { prompt, subAccountId, projectId: existingProjectId } = body as {
@@ -53,13 +55,28 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    if (inFlightProjects.get(project.id)) {
+      return new Response(
+        JSON.stringify({ error: "Build already in progress for this project" }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    inFlightProjects.set(project.id, true);
+    projectIdForLock = project.id;
+
     // ── SSE STREAM ───────────────────────────────────────
     const encoder = new TextEncoder();
     let isClosed = false;
+    let isDone = false;
 
-    // Track all final (non-provisional) files for a single bulk upsert at done.
+    // Track all files (with provisional flag) for a single bulk upsert at done.
     // This avoids per-file DB round trips and ensures atomicity.
-    const finalFiles = new Map<string, string>(); // path → content
+    // Smart deduplication: final emits (provisional=false) override provisional ones.
+    const allFiles = new Map<string, StreamFile>();
+    
+    // Track pending onFile promises so onDone waits for all callbacks to settle
+    const pendingOnFile: Promise<void>[] = [];
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -99,24 +116,28 @@ export async function POST(req: NextRequest) {
               onFile: async (file: StreamFile) => {
                 if (isClosed) return;
 
-                // FIX: Remove the `provisional` guard. The pipeline's smartEmitFile
-                // deduplicates by content — if a file's content didn't change between
-                // the provisional S2 emit and the final S4 emit, onFile is never called
-                // with provisional=false. This means boilerplate files (package.json,
-                // index.html, src/main.jsx) whose content is stable across stages were
-                // never saved to DB. Saving on every onFile call is safe because:
-                //   1. The pipeline controls emission (dedup map prevents redundant calls)
-                //   2. We do a final bulk upsert at done anyway
-                //   3. Provisional files will be overwritten if a final version arrives
+                // Track this async operation so onDone can wait for all onFile calls to complete
+                const p = (async () => {
+                  // Smart deduplication: prefer final (provisional=false) over provisional
+                  const existing = allFiles.get(file.path);
+                  const incomingIsFinal = file.provisional === false;
+                  const existingIsFinal = existing?.provisional === false;
+                  
+                  // Only overwrite if: no existing, OR incoming is final, 
+                  // OR existing is also provisional (last provisional wins)
+                  if (!existing || incomingIsFinal || !existingIsFinal) {
+                    allFiles.set(file.path, file);
+                  }
 
-                // Stream the file to client immediately
-                send({
-                  type: "file",
-                  file: { path: file.path, content: file.content },
-                });
-
-                // Collect for bulk save — last write wins (correct behavior)
-                finalFiles.set(file.path, file.content);
+                  // Stream the file to client immediately
+                  send({
+                    type: "file",
+                    file: { path: file.path, content: file.content },
+                  });
+                })();
+                
+                pendingOnFile.push(p);
+                // Do NOT await here — let it run concurrently
               },
 
               onLog: (message: string) => {
@@ -126,10 +147,20 @@ export async function POST(req: NextRequest) {
               onPing: ping,
 
               onDone: async () => {
+                if (isDone) {
+                  console.warn('[chat/route] onDone called twice — ignoring duplicate');
+                  return;
+                }
+                isDone = true;
+
+                // ── Wait for all onFile callbacks to settle before saving ──
+                // This ensures allFiles is complete before the bulk upsert
+                await Promise.allSettled(pendingOnFile);
+
                 // ── Bulk upsert ALL collected files at pipeline completion ──
                 // This is the single source of truth for what gets persisted.
-                const filesToSave = Array.from(finalFiles.entries()).map(
-                  ([path, content]) => ({ path, content })
+                const filesToSave = Array.from(allFiles.values()).map(
+                  (file) => ({ path: file.path, content: file.content })
                 );
 
                 console.log(
@@ -204,6 +235,8 @@ export async function POST(req: NextRequest) {
           console.error("❌ [chat/route] Pipeline error:", msg);
           send({ type: "error", message: msg });
           close();
+        } finally {
+          if (projectIdForLock) inFlightProjects.delete(projectIdForLock);
         }
       },
     });
@@ -220,6 +253,7 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (err) {
+    if (projectIdForLock) inFlightProjects.delete(projectIdForLock);
     console.error("❌ [chat/route] Request error:", err);
     return new Response(
       JSON.stringify({ error: "Internal server error" }),

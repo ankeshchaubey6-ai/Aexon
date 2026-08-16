@@ -523,9 +523,11 @@ model AIProject {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  name         String
-  description  String?  @db.Text
-  subAccountId String
+  name             String
+  description      String?  @db.Text
+  subAccountId     String
+  registryVersion  String?  // SHA-256 hash of components.metadata.json at generation time
+  sitePlan         String?  @db.LongText // JSON of SitePlan for debugging/replay
 
   files AIProjectFile[]
   messages AIMessage[]
@@ -539,9 +541,11 @@ model AIProjectFile {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  path      String   @db.VarChar(500)
-  content   String   @db.LongText
-  projectId String
+  path               String   @db.VarChar(500)
+  content            String   @db.LongText
+  projectId          String
+  provenance         String   @default("custom") // "pool" | "custom" | "assembly"
+  validationStatus   String   @default("PENDING") // "PENDING" | "PASSED" | "FAILED"
 
   project AIProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -554,11 +558,13 @@ model AIMessage {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  projectId      String
-  role           String  // "USER" | "ASSISTANT"
-  content        String  @db.LongText
-  status         String  @default("PENDING") // "PENDING" | "DONE" | "ERROR"
-  filesGenerated Int?
+  projectId         String
+  role              String  // "USER" | "ASSISTANT"
+  content           String  @db.LongText
+  status            String  @default("PENDING") // "PENDING" | "DONE" | "ERROR"
+  filesGenerated    Int?
+  failedAtStep      String? // "parse-intent" | "resolve-components" | "validate-quality" | etc.
+  validationErrors  String? @db.LongText // JSON array of {file, message, line}
 
   project AIProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
 

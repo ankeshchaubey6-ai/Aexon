@@ -78,10 +78,10 @@ const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
 // Verified against NVIDIA NIM catalog (April 2026).
 const EDIT_MODELS = [
   "qwen/qwen3-coder-480b-a35b-instruct",       // #1 — best code model on NVIDIA NIM
-  "mistralai/devstral-2-123b-instruct-2512",   // #2 — state-of-the-art open code model
-  "moonshotai/kimi-k2-instruct",               // #3 — strong reasoning + coding
-  "mistralai/mistral-large-3-675b-instruct-2512", // #4 — reliable general + code fallback
-  "meta/llama-4-maverick-17b-128e-instruct",   // #5 — fast, multimodal fallback
+  "meta/llama-4-maverick-17b-128e-instruct",   // #2 — fast, multimodal fallback
+  "mistralai/mistral-nemotron",                // #3 — reliable general + code fallback
+  "minimaxai/minimax-m2.7",                    // #4 — fast generalist
+  "stepfun-ai/step-3.5-flash",                 // #5 — low-latency fallback
 ] as const;
 
 type EditModel = typeof EDIT_MODELS[number];
@@ -664,6 +664,13 @@ export async function generateEdit(
 
           const status = (e as { status?: number })?.status ?? 0;
           const msg    = (e as Error)?.message ?? String(e);
+
+          if (status === 410) {
+            // Model is gone/deprecated — instantly mark unhealthy, don't retry
+            for (let i = 0; i < 3; i++) editHealth.recordFailure(model);
+            console.warn(`[editor] Model ${mlabel(model)} returned 410 Gone — skipping permanently`);
+            break;
+          }
 
           if (status === 401 || status === 403) {
             console.error("[editor] Auth error — check NVIDIA_API_KEY");

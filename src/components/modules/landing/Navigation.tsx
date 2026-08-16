@@ -307,12 +307,7 @@ const Navigation: React.FC<NavigationProps> = async ({}) => {
               {/* ACTIONS */}
               <div className="flex items-center gap-2 shrink-0">
 
-                {/* Version badge with premium hover */}
-                <span className="nav-badge hidden sm:inline-flex">
-                  <span className="nav-badge-dot" />
-                  v2.0
-                </span>
-
+                {/* Version badge removed */}
                 <span className="nav-sep hidden sm:block" />
 
                 {/* CTA with enhanced premium hover */}

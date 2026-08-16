@@ -223,15 +223,17 @@ interface ModeConfig {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const PLAN_MODELS = [
-  "moonshotai/kimi-k2-instruct",
-  "mistralai/mistral-large-3-675b-instruct-2512",
+  "mistralai/mistral-nemotron",
+  "minimaxai/minimax-m2.7",
+  "stepfun-ai/step-3.5-flash",
   "meta/llama-4-maverick-17b-128e-instruct",
 ] as const;
 
 const CODEGEN_MODELS = [
   "qwen/qwen3-coder-480b-a35b-instruct",
-  "mistralai/devstral-2-123b-instruct-2512",
-  "meta/llama-3.3-70b-instruct",
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mistral-nemotron",
+  "minimaxai/minimax-m2.7",
 ] as const;
 
 type PlanModel    = typeof PLAN_MODELS[number];
@@ -247,6 +249,8 @@ const MAX_FILE_CHARS      = 14_000;
 const JSX_IMBALANCE_TOL   = 2;
 const PLAN_MAX_TOKENS     = 5000;
 const CODEGEN_MAX_TOKENS  = 8000;
+const LARGE_FILE_TIMEOUT_MS  = 150_000;
+const LARGE_FILE_MAX_TOKENS  = 10_000;
 
 const BOILERPLATE_PATHS = new Set([
   "package.json",
@@ -875,17 +879,61 @@ function detectAndFixSyntaxErrors(file: StreamFile): StreamFile {
   let content = file.content;
   const warnings: string[] = [];
 
-  // ── Check 1: Unterminated strings ──
-  const doubleQuoteCount = (content.match(/"/g) ?? []).length;
-  if (doubleQuoteCount % 2 !== 0) {
-    warnings.push(`⚠️ ${file.path}: ODD number of double quotes (${doubleQuoteCount}) — possible unterminated string`);
-    plog(`[SYNTAX] ${file.path}: Unterminated string detected (${doubleQuoteCount} quotes)`);
+  // ── Check 1: Unterminated strings (especially image URLs) ──
+  let lines = content.split("\n");
+  let hadUnterminated = false;
+  
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    
+    // Count unescaped quotes in this line
+    let quoteCount = 0;
+    let inEscape = false;
+    for (let j = 0; j < line.length; j++) {
+      if (inEscape) {
+        inEscape = false;
+        continue;
+      }
+      if (line[j] === '\\') {
+        inEscape = true;
+        continue;
+      }
+      if (line[j] === '"') quoteCount++;
+    }
+    
+    // If odd number of quotes, try to fix it
+    if (quoteCount % 2 !== 0) {
+      hadUnterminated = true;
+      plog(`[SYNTAX] ${file.path}:${i + 1}: Unterminated string (${quoteCount} quotes)`);
+      
+      // Check if this is an image URL line
+      if (/\/api\/image\?url=/.test(line)) {
+        // Line has image URL but missing closing quote
+        // Add closing quote at end of line if not already there
+        if (!line.trimEnd().endsWith('"') && !line.trimEnd().endsWith("'")) {
+          line = line.trimEnd() + '"';
+        }
+      } else if (/^[^"]*"[^"]*$/.test(line)) {
+        // Simple case: starts with some text, then has exactly one quote
+        // Add closing quote at the end
+        if (!line.trimEnd().endsWith('"')) {
+          line = line.trimEnd() + '"';
+        }
+      }
+      lines[i] = line;
+    }
+  }
+  
+  content = lines.join("\n");
+  
+  if (hadUnterminated) {
+    warnings.push(`⚠️ ${file.path}: Fixed unterminated string(s)`);
   }
 
   // ── Check 2: SVG path length limit ──
   // Any SVG path d attribute longer than 500 chars is replaced with safe placeholder
   const longPathRegex = /d="[^"]{200,}"?/g;
-content = content.replace(longPathRegex, 'd="M0 0h24v24H0z"');
+  content = content.replace(longPathRegex, 'd="M0 0h24v24H0z"');
 
   const longPaths = content.match(longPathRegex);
   if (longPaths) {
@@ -919,6 +967,62 @@ function validateFile(file: StreamFile): ValidationResult {
     const close = (c.match(/<\/[A-Z][a-zA-Z0-9]*>/g)     ?? []).length;
     const self  = (c.match(/<[A-Z][a-zA-Z0-9]*[^>]*\/>/g) ?? []).length;
     if (Math.abs(open - close - self) > JSX_IMBALANCE_TOL) reasons.push("JSX tag imbalance");
+
+    // Check for closing tags with no matching open tag
+    const WRONG_CLOSE_TAGS = ["font", "center", "marquee", "blink"];
+    for (const tag of WRONG_CLOSE_TAGS) {
+      const opens  = (c.match(new RegExp(`<${tag}[\\s>]`, "g")) ?? []).length;
+      const closes = (c.match(new RegExp(`</${tag}>`, "g")) ?? []).length;
+      if (closes > opens) {
+        reasons.push(`mismatched closing tag </${tag}> (${closes} closes, ${opens} opens)`);
+      }
+    }
+    
+    // ── React-specific pattern checks ──
+    // Check for hooks outside component (module-level)
+    if (/^(const|let|var)\s+\[\w+,\s*set\w+\]\s*=\s*useState/m.test(c) && !/^function|^const.*=\s*(?:function|.*=>)/.test(c)) {
+      reasons.push("hooks detected outside component");
+    }
+    
+    // Check for @media or pseudo-selectors in inline styles
+    if (/@media|@supports|:hover|:focus|::before|::after/.test(c.match(/style={{[^}]*}}/g)?.join('') || '')) {
+      reasons.push("inline styles contain unsupported selectors (@media, pseudo-selectors)");
+    }
+    
+    // Check for duplicate component sections (crude check)
+    const sectionMatches = c.match(/<section[^>]*>/g) || [];
+    if (sectionMatches.length > 5) {
+      reasons.push(`too many sections (${sectionMatches.length}) - possible duplication`);
+    }
+
+    // Check for likely ReferenceError: bare identifiers in JSX
+    // that look like they should be destructured from a map callback param
+    const jsxBareVars = c.match(/\{([a-z][a-zA-Z0-9_$]*)\}/g) ?? [];
+    const declared = new Set(
+      [...(c.matchAll(/(?:const|let|var|function)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)/g))]
+        .map((m) => m[1])
+    );
+    const ALWAYS_IN_SCOPE = new Set([
+      "true", "false", "null", "undefined", "Math", "Date", "Array",
+      "Object", "String", "Number", "Boolean", "JSON", "console",
+      "window", "document", "setTimeout", "clearTimeout", "setInterval",
+      "clearInterval", "fetch", "Promise", "Error",
+    ]);
+    const paramMatches = c.matchAll(/function\s+\w+\s*\(\s*\{([^}]+)\}/g);
+    for (const m of paramMatches) {
+      m[1].split(",").forEach((p) => declared.add(p.trim().split(":")[0].trim().split("=")[0].trim()));
+    }
+    const likelyUndeclared = jsxBareVars
+      .map((v) => v.slice(1, -1))
+      .filter((v) =>
+        v.length > 1 &&
+        !declared.has(v) &&
+        !ALWAYS_IN_SCOPE.has(v) &&
+        !/^[A-Z]/.test(v)
+      );
+    if (likelyUndeclared.length > 3) {
+      reasons.push(`likely undeclared variables in JSX: ${likelyUndeclared.slice(0, 5).join(', ')}`);
+    }
   }
 
   return { passed: reasons.length === 0, reasons };
@@ -943,13 +1047,26 @@ function applyValidationGate(files: StreamFile[], tokens: DesignTokens, projectI
     // ── Apply syntax error detection and fixes ──
     let fixedFile = detectAndFixSyntaxErrors(file);
 
+    const isImageableComponent =
+      file.path.endsWith(".jsx") &&
+      !file.path.includes("/data/") &&
+      !file.path.includes("/hooks/") &&
+      !file.path.includes("/lib/") &&
+      !file.path.includes("/types/") &&
+      !file.path.includes("/utils") &&
+      file.path !== "src/App.jsx" &&
+      !/layout|Layout/i.test(file.path);
+
     // ── Enforce mandatory image rendering ──
-    if (!fixedFile.content.includes("<img")) {
-      const imageUrl = pickImagesForRole(
+    if (isImageableComponent && !fixedFile.content.includes("<img")) {
+      const baseUrl = pickImagesForRole(
         file.path,
         file.path,
         projectImages ?? { hero: [], features: [], gallery: [], avatars: [], backgrounds: [], contextBlock: "" },
       ).images[0]?.url ?? resolveFallbackImage(file.path, tokens.projectType);
+      
+      // Wrap URL in /api/image proxy for WebContainer COEP compatibility
+      const imageUrl = `/api/image?url=${encodeURIComponent(baseUrl)}`;
       plog(`[IMAGE FIX] Injecting fallback image into ${fixedFile.path}`);
       fixedFile.content = fixedFile.content.replace(
         "</section>",
@@ -967,6 +1084,13 @@ function applyValidationGate(files: StreamFile[], tokens: DesignTokens, projectI
       plog(`[GATE] ${fixedFile.path} FAILED — ${v.reasons.join("; ")} → safe-replacing`);
       return makeSafeComponent(fixedFile, tokens, projectImages);
     }
+    
+    // ── Post-fix: Clean up any JSX syntax issues from quote fixes ──
+    fixedFile.content = fixedFile.content
+      .replace(/"\s+\/>/g, '" />')  // Ensure proper spacing before self-closing
+      .replace(/"\s*\n\s*\/>/g, '"\n      />')  // Fix newlines before self-closing tags
+      .replace(/"\s*\n\s*\)}/g, '"\n    )}');  // Fix newlines in map functions
+    
     return fixedFile;
   }).filter(Boolean);
 }
@@ -989,11 +1113,14 @@ function makeSafeComponent(file: StreamFile, tokens: Partial<DesignTokens>, proj
   const bg       = tokens.bgCard    ?? "#111827";
   const text     = tokens.text      ?? "#F9FAFB";
   const muted    = tokens.textMuted ?? "#6B7280";
-  const imageUrl = pickImagesForRole(
+  const baseUrl = pickImagesForRole(
     file.path,
     file.path,
     projectImages ?? { hero: [], features: [], gallery: [], avatars: [], backgrounds: [], contextBlock: "" },
   ).images[0]?.url ?? resolveFallbackImage(file.path, tokens.projectType);
+  
+  // Wrap URL in /api/image proxy for WebContainer COEP compatibility
+  const imageUrl = `/api/image?url=${encodeURIComponent(baseUrl)}`;
 
   const content = cleanOutput(
     `import React from 'react';
@@ -1366,6 +1493,12 @@ async function planProject(prompt: string, mode: ModeConfig, onPing?: () => void
       clearTimeout(timeout);
       planHealth.recordFailure(model);
       const status = (e as { status?: number })?.status ?? 0;
+      if (status === 410) {
+        // Model is gone/deprecated — instantly mark unhealthy, don't retry
+        for (let i = 0; i < 3; i++) planHealth.recordFailure(model);
+        perr(`[S1] Model ${mlabel(model)} returned 410 Gone — skipping permanently`);
+        continue;
+      }
       if (status === 401 || status === 403) { perr("[S1] Auth error"); return null; }
       perr(`[S1] ${mlabel(model)} failed: ${String(e)}`);
       if (mi < models.length - 1) await sleep(1000);
@@ -1642,6 +1775,13 @@ ABSOLUTE RULES
 14. ARRAY PROP SAFETY: Every component that receives an array prop MUST default it to []:
     WRONG: function Grid({ items }) { return items.map(...) }
     RIGHT: function Grid({ items = [] }) { return (items || []).map(...) }
+15b. MAP CALLBACK DESTRUCTURING: When using .map() with object arrays,
+  ALWAYS destructure the properties you use from the callback parameter.
+  WRONG: items.map(item => <div>{name}</div>)  // name is not defined
+  RIGHT: items.map(({ name, id }) => <div key={id}>{name}</div>)
+  OR:    items.map(item => <div>{item.name}</div>)
+  NEVER use bare property names inside a map callback without either
+  destructuring them in the parameter or accessing them via the param.
 15. APP.JSX RENDERING: Components rendered in App.jsx receive NO props from parent.
     Every component must be fully self-contained with its own internal data/state.
     NEVER design a component that requires props to be passed from App.jsx.
@@ -1653,9 +1793,75 @@ ABSOLUTE RULES
       return images.map(img => <img key={img.src} src={img?.src} alt={img?.alt} />);
     }
 16. SVG CONSTRAINT: Never generate SVG path d attributes longer than 200 characters.
-    Use short paths or unicode characters for icons instead.
+  Use short paths or unicode characters for icons instead.
+  NEVER split an SVG path d attribute value across a string boundary. The entire
+  d="..." value must be a single complete string with no embedded quotes.
+  If a path value is complex, replace it with d="M0 0h24v24H0z".
     WRONG: d="M0 0h16v16H0zM0 0h16v16H0zM0 0h16v16H0zM0 0h16v16H0z..." (repeating patterns)
     RIGHT: d="M0 0h16v16H0z" (short, simple)
+17. IMAGE URL CONSTRAINT: Never truncate, modify, or URL-encode image URLs.
+    Image URLs are provided COMPLETE and ALREADY PROXIED (/api/image?url=...).
+    When embedding in JSX, copy them EXACTLY:
+    WRONG: image: "/api/image?url=https%3A%2F%2Fimages.un...truncated"
+    RIGHT: image: "/api/image?url=https%3A%2F%2Fimages.unsplash.com%2Fphoto-1526628953301-3e589a6a8b74"
+    If a line becomes long, that is FINE — do NOT shorten it.
+    Keep string quotes matched and complete. NO unterminated strings.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REACT HOOKS & STATE RULES (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. HOOKS ONLY INSIDE COMPONENTS:
+    ❌ NEVER at module level
+    ❌ NEVER in event handlers
+    ✓ ALWAYS inside function component body
+    Example:
+    WRONG: const [state, setState] = useState([]); // OUTSIDE component
+    RIGHT: function MyComponent() { const [state, setState] = useState([]); }
+
+19. STATE STRUCTURE CONSISTENCY:
+    If storing IDs, ALWAYS store IDs (never mix with objects)
+    WRONG: const [items, setItems] = useState([{ id: 1, name: 'A' }, 2, 3])
+    RIGHT: const [itemIds, setItemIds] = useState([1, 2, 3])
+    Then fetch full objects separately if needed
+
+20. CUSTOM HOOKS - DO NOT create or call custom hooks unless absolutely necessary.
+    Use built-in hooks ONLY: useState, useEffect, useCallback, etc.
+    WRONG: function useLocalStorage() { ... } // custom hook
+    RIGHT: Use useState directly in components
+
+21. EVENT HANDLER PATTERNS:
+    ✓ onClick={(e) => handleClick(e)}
+    ✓ onChange={(e) => setInput(e.target.value)}
+    ❌ onChange={(e) => handleChange({ target: e.target })} // overcomplicated
+    ❌ onChange={handleChange.bind(this)} // no bind in functional components
+
+22. INLINE STYLES LIMITATIONS:
+    ✓ Use inline styles for colors, spacing, fonts, animations
+    ❌ NO media queries in inline styles
+    ❌ NO pseudo-selectors in inline styles
+    If you need responsive behavior, use JavaScript:
+    WRONG: style={{ '@media (min-width: 768px)': { color: 'red' } }}
+    RIGHT: style={{ color: window.innerWidth >= 768 ? 'red' : 'blue' }}
+
+23. NO DUPLICATE UI BLOCKS:
+    If you write a component section, use it once
+    WRONG: Two identical "Bulk Actions" sections
+    RIGHT: One reusable component mapped in array
+
+24. LOCALSTORAGE SSR SAFETY:
+    Always check if window exists before using localStorage
+    WRONG: window.localStorage.getItem('key')
+    RIGHT: if (typeof window !== 'undefined') { localStorage.getItem('key'); }
+
+25. NO STYLE TAGS INSIDE COMPONENTS:
+    ❌ NEVER: <style>{'@keyframes ...'}</style> inside render
+    This causes re-injection on every render
+    Global animations are injected by App.jsx - use them
+
+26. SINGLE FILE = SINGLE EXPORT:
+    One file = ONE component or ONE hook or ONE data export
+    WRONG: export default useLocalStorage; + export default Inventory + React import mixed
+    RIGHT: Each in separate file
 
 AVAILABLE PACKAGES: react@18, react-dom@18 — nothing else`;
 }
@@ -1673,9 +1879,9 @@ function getComponentRoleInstructions(
     ? pickImagesForRole(fileSpec.path, fileSpec.description, projectImages)
     : { inlineHint: "", images: [] };
 
-  const imageUsage = images && images.length
-    ? `Use these images (REQUIRED):\n${images.map((i: any) => i.url).join("\n")}`
-    : `Use fallback image:\n${resolveFallbackImage(`${fileSpec.path} ${fileSpec.description}`, tokens.projectType)}`;
+  const imageUsage = images && images.length > 0
+    ? `IMAGES (use EXACTLY as provided — do NOT modify, truncate, or URL-encode):\n${images.map((i: any, idx: number) => `  [${idx}] "${i.url}"`).join("\n")}`
+    : `FALLBACK IMAGE (use EXACTLY as provided):\n  "${resolveFallbackImage(`${fileSpec.path} ${fileSpec.description}`, tokens.projectType)}"`;
 
   const selfContainedDataRule = `SELF-CONTAINED DATA RULE:
 This component will be rendered as <ComponentName /> with NO props from parent.
@@ -1692,6 +1898,10 @@ Use (array || []).map() for all array iterations.
 * NEVER rely only on background images
 * ALWAYS use provided image URLs or fallback
 * Image must be visible in JSX
+* CRITICAL: Image URLs are COMPLETE and ALREADY PROXIED (/api/image?url=...)
+  ✓ COPY image URLs exactly as shown in IMAGES section
+  ✗ DO NOT truncate, modify, or re-encode them
+  ✗ DO NOT close quotes early or leave strings unclosed
 
 ${imageUsage}`;
 
@@ -1925,6 +2135,15 @@ async function generateFile(
   const system     = makeCodegenSystemPrompt(spec, tokens, generatedSoFar, projectImages);
   const userPrompt = makeFileUserPrompt(fileSpec, spec, tokens, generatedSoFar, projectImages);
 
+  const isLargeFile =
+    fileSpec.path.includes("/data/") ||
+    fileSpec.path.includes("/types/") ||
+    fileSpec.path.includes("mockData") ||
+    fileSpec.path.includes("index.ts");
+
+  const FILE_TIMEOUT    = isLargeFile ? LARGE_FILE_TIMEOUT_MS : 90_000;
+  const FILE_MAX_TOKENS = isLargeFile ? LARGE_FILE_MAX_TOKENS : CODEGEN_MAX_TOKENS;
+
   for (let mi = 0; mi < models.length; mi++) {
     const model = models[mi];
 
@@ -1933,7 +2152,7 @@ async function generateFile(
       onPing?.();
 
       const abort   = new AbortController();
-      const timeout = setTimeout(() => abort.abort(), 90_000);
+      const timeout = setTimeout(() => abort.abort(), FILE_TIMEOUT);
       const t0      = Date.now();
 
       try {
@@ -1943,7 +2162,7 @@ async function generateFile(
         const res = await nvidia.chat.completions.create(
           {
             model, temperature,
-            max_tokens: CODEGEN_MAX_TOKENS,
+            max_tokens: FILE_MAX_TOKENS,
             messages: [
               { role: "system", content: system     },
               { role: "user",   content: userPrompt },
@@ -2003,6 +2222,12 @@ async function generateFile(
         codeHealth.recordFailure(model);
         const status = (e as { status?: number })?.status ?? 0;
         const msg    = (e as Error)?.message ?? String(e);
+        if (status === 410) {
+          // Model is gone/deprecated — instantly mark unhealthy, don't retry
+          for (let i = 0; i < 3; i++) codeHealth.recordFailure(model);
+          perr(`[S2] Model ${mlabel(model)} returned 410 Gone — skipping permanently`);
+          break;
+        }
         if (status === 401 || status === 403) {
           perr(`[S2] Auth error`);
           emitGenerationError(onEvent, e, fileSpec.path, attempt + 1);
@@ -2196,6 +2421,82 @@ function applyPropSafetyFixes(content: string, filePath: string): string {
   return result;
 }
 
+/**
+ * Detects bare variable usage inside .map() callbacks where the variable
+ * is likely a destructured property that was accidentally omitted.
+ *
+ * Pattern: someArray.map(item => { ... uses item.foo as just foo ... })
+ * Fix: rewrite the callback param to destructure the used names.
+ *
+ * Only rewrites simple single-param arrow function callbacks.
+ */
+function fixUndeclaredMapVariables(content: string): string {
+  return content.replace(
+    /\.map\(\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=>\s*(\{[\s\S]*?\n\s*\}|\([\s\S]*?\n\s*\))/g,
+    (match, param, body) => {
+      if (param.startsWith("{") || param.startsWith("[")) return match;
+
+      const JS_KEYWORDS = new Set([
+        "return", "const", "let", "var", "if", "else", "for", "while",
+        "true", "false", "null", "undefined", "typeof", "instanceof",
+        "new", "this", "class", "function", "import", "export", "default",
+        "style", "key", "ref", "children", "index", "React", "useState",
+        "useEffect", "useCallback", "useMemo", "useRef",
+      ]);
+
+      const declaredInBody = new Set<string>();
+      const declMatches = body.matchAll(/(?:const|let|var)\s+(?:\{([^}]+)\}|([a-zA-Z_$][a-zA-Z0-9_$]*))/g);
+      for (const m of declMatches) {
+        if (m[1]) {
+          m[1].split(",").forEach((s: string) => declaredInBody.add(s.trim().split(":")[0].trim()));
+        } else if (m[2]) {
+          declaredInBody.add(m[2]);
+        }
+      }
+
+      const bareUsages = new Set<string>();
+      const usageMatches = body.matchAll(/\{([a-zA-Z_$][a-zA-Z0-9_$]*)\}/g);
+      for (const m of usageMatches) {
+        const name = m[1];
+        if (
+          name !== param &&
+          !JS_KEYWORDS.has(name) &&
+          !declaredInBody.has(name) &&
+          !name.startsWith("on") &&
+          !/^[A-Z]/.test(name)
+        ) {
+          bareUsages.add(name);
+        }
+      }
+
+      const attrMatches = body.matchAll(/=\{([a-zA-Z_$][a-zA-Z0-9_$]*)\}/g);
+      for (const m of attrMatches) {
+        const name = m[1];
+        if (
+          name !== param &&
+          !JS_KEYWORDS.has(name) &&
+          !declaredInBody.has(name) &&
+          !name.startsWith("on") &&
+          !/^[A-Z]/.test(name)
+        ) {
+          bareUsages.add(name);
+        }
+      }
+
+      if (bareUsages.size === 0) return match;
+
+      if (body.startsWith("{")) {
+        const destructuringLine = `\n  const { ${[...bareUsages].join(", ")} } = ${param};`;
+        const newBody = "{" + destructuringLine + body.slice(1);
+        return `.map(${param} =>${newBody}`;
+      }
+
+      const destructuringLine = `const { ${[...bareUsages].join(", ")} } = ${param};\n  `;
+      return `.map(${param} => {\n  ${destructuringLine}return ${body};\n})`;
+    }
+  );
+}
+
 function deterministicFixPass(files: StreamFile[]): StreamFile[] {
   return files.map((file) => {
     if (BOILERPLATE_PATHS.has(file.path)) return file;
@@ -2203,6 +2504,34 @@ function deterministicFixPass(files: StreamFile[]): StreamFile[] {
     if (!file.path.endsWith(".jsx") && !file.path.endsWith(".js")) return file;
 
     let c = file.content;
+      if (file.path.endsWith(".jsx")) {
+        // FIX A: Repair broken SVG path d attributes (quote closed mid-value)
+        // Pattern: d="<valid path content>" <more content that looks like path data>
+        c = c.replace(
+          /d="([^"]{0,300})"(\s+[0-9][\d\s.a-zA-Z,-]*?)(?=\s+(?:[a-zA-Z]+[^=]*=|\/?>))/g,
+          'd="M0 0h24v24H0z"'
+        );
+        // Also catch the case where the whole thing before /> has broken data
+        c = c.replace(
+          /d="([^"]{0,300})"(\s+[\d][\d\s.,a-zA-Z-]{0,200})(\s*\/?>)/g,
+          'd="M0 0h24v24H0z"$3'
+        );
+
+        // FIX B: Replace hallucinated closing tags that have no matching open tag
+        const WRONG_CLOSE_TAGS = ["font", "span", "p", "b", "i", "u", "strong", "em", "center"];
+        for (const wrongTag of WRONG_CLOSE_TAGS) {
+          const openCount  = (c.match(new RegExp(`<${wrongTag}[\\s>]`, "g")) ?? []).length;
+          const closeCount = (c.match(new RegExp(`</${wrongTag}>`, "g")) ?? []).length;
+          if (closeCount > openCount) {
+            // More closes than opens — replace excess with </div>
+            let excess = closeCount - openCount;
+            c = c.replace(new RegExp(`</${wrongTag}>`, "g"), (match) => {
+              if (excess > 0) { excess--; return "</div>"; }
+              return match;
+            });
+          }
+        }
+      }
     c = stripBannedImports(c);
     if (file.path.endsWith(".jsx")) c = ensureReactImport(c);
     if (file.path.endsWith(".jsx")) c = ensureDefaultExport(c, file.path.split("/").pop()!.replace(".jsx", ""));
@@ -2215,6 +2544,7 @@ function deterministicFixPass(files: StreamFile[]): StreamFile[] {
     }
 
     c = fixUseEffectDeps(c);
+    if (file.path.endsWith(".jsx")) c = fixUndeclaredMapVariables(c);
     if (file.path.endsWith(".jsx")) c = fixJsxImbalance(c);
     c = deduplicateImports(c);
     c = fixTokenCorruption(c);
@@ -2269,10 +2599,11 @@ async function smartEmitFile(
   }
  
   const isFinal = toEmit.provisional === false;
+  const contentChanged = emitted.get(toEmit.path) !== toEmit.content;
  
   // For provisional emits: skip if content unchanged (avoid redundant client updates)
   // For final emits: ALWAYS call onFile — this is what gets saved to DB
-  if (!isFinal && emitted.get(toEmit.path) === toEmit.content) return;
+  if (!isFinal && !contentChanged) return;
  
   emitted.set(toEmit.path, toEmit.content);
   try { await onFile(toEmit); } catch (e) { perr(`[EMIT] onFile threw for ${toEmit.path}: ${String(e)}`); }
