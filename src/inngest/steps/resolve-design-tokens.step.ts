@@ -13,6 +13,7 @@
  */
 
 
+import { inngest } from "../client";
 import { resolveTokens } from "@/lib/design-system/resolve-tokens";
 import { manifestToCss } from "@/lib/design-system/manifest-to-css";
 
@@ -89,13 +90,12 @@ export async function resolveDesignTokensStep(input: ResolveDesignTokensInput) {
  * Inngest event definition
  */
 export const resolveDesignTokensEvent = inngest.createFunction(
-  { id: "resolve-design-tokens" },
-  { event: "ai/resolve-design-tokens" },
+  { id: "resolve-design-tokens", triggers: [{ event: "ai/resolve-design-tokens" }] },
   async ({ event, logger, step }) => {
     logger.info("resolve-design-tokens", { projectId: event.data.projectId });
 
     const result = await step.run("resolve-tokens", async () => {
-      return resolveDesignTokensStep(event.data);
+      return resolveDesignTokensStep(event.data as ResolveDesignTokensInput);
     });
 
     return result;

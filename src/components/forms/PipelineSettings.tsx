@@ -214,7 +214,7 @@ const PipelineSettings = ({
                     Delete Pipeline
                   </AlertDialogTitle>
                   <AlertDialogDescription className="text-base pt-4">
-                    Are you sure you want to delete <span className="font-semibold text-rose-600 dark:text-rose-400">"{currentPipeline?.name}"</span>?
+                    Are you sure you want to delete <span className="font-semibold text-rose-600 dark:text-rose-400">&quot;{currentPipeline?.name}&quot;</span>?
                   </AlertDialogDescription>
                 </AlertDialogHeader>
 

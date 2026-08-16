@@ -160,7 +160,7 @@ export const InfiniteMovingCards: React.FC<InfiniteMovingCardsProps> = ({
 
                 {/* Quote Text */}
                 <blockquote className="relative z-20 text-sm md:text-base leading-relaxed text-foreground/90 italic">
-                  "{item.quote}"
+                  &quot;{item.quote}&quot;
                 </blockquote>
 
                 {/* Author Section */}

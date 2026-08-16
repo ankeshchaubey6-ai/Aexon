@@ -233,7 +233,7 @@ const UploadMediaForm: React.FC<UploadMediaFormProps> = ({ subAccountId }) => {
                         />
                       </FormControl>
                       <FormDescription className="text-xs text-slate-500">
-                        Choose a name that's easy to remember
+                        Choose a name that&apos;s easy to remember
                       </FormDescription>
                       <FormMessage />
                     </FormItem>

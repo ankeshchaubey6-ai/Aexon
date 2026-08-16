@@ -14,6 +14,7 @@
  */
 
 
+import { inngest } from "../client";
 import { loadRegistry, getComponentsByCategory } from "@/lib/component-pool/registry";
 
 import type { SitePlan } from "@/lib/types/site-plan";
@@ -97,13 +98,12 @@ export async function buildRegistryContextStep(
  * Inngest event definition
  */
 export const buildRegistryContextEvent = inngest.createFunction(
-  { id: "build-registry-context" },
-  { event: "ai/build-registry-context" },
+  { id: "build-registry-context", triggers: [{ event: "ai/build-registry-context" }] },
   async ({ event, logger, step }) => {
     logger.info("build-registry-context", { projectId: event.data.projectId });
 
     const result = await step.run("build-context", async () => {
-      return buildRegistryContextStep(event.data);
+      return buildRegistryContextStep(event.data as BuildRegistryContextInput);
     });
 
     return result;

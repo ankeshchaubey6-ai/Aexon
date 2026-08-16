@@ -292,7 +292,7 @@ const FunnelPageDetails: React.FC<FunnelPageDetailsProps> = ({
                     <Info className="w-4 h-4 text-slate-400" />
                   </TooltipTrigger>
                   <TooltipContent>
-                    <p className="text-xs">First page doesn't require a path</p>
+                    <p className="text-xs">First page doesn&apos;t require a path</p>
                   </TooltipContent>
                 </Tooltip>
               )}

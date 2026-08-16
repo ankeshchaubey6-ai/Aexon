@@ -15,6 +15,7 @@
  */
 
 
+import { inngest } from "../client";
 import { db } from "@/lib/db";
 
 import type { AIFile } from "@/lib/types/ai-file";
@@ -110,13 +111,12 @@ export async function persistFilesStep(input: PersistFilesInput): Promise<Persis
  * Inngest event definition
  */
 export const persistFilesEvent = inngest.createFunction(
-  { id: "persist-files" },
-  { event: "ai/persist-files" },
+  { id: "persist-files", triggers: [{ event: "ai/persist-files" }] },
   async ({ event, logger, step }) => {
     logger.info("persist-files", { projectId: event.data.projectId });
 
     const result = await step.run("persist", async () => {
-      return persistFilesStep(event.data);
+      return persistFilesStep(event.data as PersistFilesInput);
     });
 
     return result;

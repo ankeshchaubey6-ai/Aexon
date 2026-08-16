@@ -41,7 +41,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-import DeleteButton from "@/DeleteButton";
+import DeleteButton from "@/app/(main)/agency/[agencyId]/all-subaccounts/_components/DeleteButton";
 
 // Define the SubAccount type based on your Prisma schema
 interface SubAccount {

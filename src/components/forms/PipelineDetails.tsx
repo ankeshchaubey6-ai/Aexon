@@ -337,7 +337,7 @@ const PipelineDetails: React.FC<PipelineDetailsProps> = ({
                               Delete Pipeline
                             </AlertDialogTitle>
                             <AlertDialogDescription className="text-base pt-4">
-                              Are you sure you want to delete <span className="font-semibold text-rose-600 dark:text-rose-400">"{defaultData?.name}"</span>?
+                              Are you sure you want to delete <span className="font-semibold text-rose-600 dark:text-rose-400">&quot;{defaultData?.name}&quot;</span>?
                             </AlertDialogDescription>
                           </AlertDialogHeader>
 

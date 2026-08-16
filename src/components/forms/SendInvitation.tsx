@@ -288,7 +288,7 @@ const SendInvitation: React.FC<SendInvitationProps> = ({ agencyId }) => {
                           />
                         </FormControl>
                         <FormDescription className="text-xs text-slate-500">
-                          We'll send an invitation email with setup instructions
+                          We&apos;ll send an invitation email with setup instructions
                         </FormDescription>
                         <FormMessage />
                       </FormItem>

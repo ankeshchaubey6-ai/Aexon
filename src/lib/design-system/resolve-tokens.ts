@@ -97,7 +97,11 @@ const DEFAULT_THEME: CSSVariableManifest = {
  * Theme presets — per-industry overrides
  * These get merged on top of DEFAULT_THEME
  */
-const THEME_PRESETS: Record<string, Partial<CSSVariableManifest>> = {
+type ThemePreset = {
+  [K in keyof CSSVariableManifest]?: Partial<CSSVariableManifest[K]>;
+};
+
+const THEME_PRESETS: Record<string, ThemePreset> = {
   saas: {
     colors: {
       "--color-accent-primary": "#6366f1",
@@ -160,8 +164,8 @@ export function resolveTokens(input: {
   for (const [category, tokens] of Object.entries(TOKEN_TAXONOMY)) {
     for (const token of tokens as readonly string[]) {
       const cat_key = category as keyof CSSVariableManifest;
-      const token_key = token as any;
-      if (!manifest[cat_key][token_key]) {
+      const categoryTokens = manifest[cat_key] as Record<string, string>;
+      if (!categoryTokens[token]) {
         throw new Error(`Missing value for token ${token}`);
       }
     }

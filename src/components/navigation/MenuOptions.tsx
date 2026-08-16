@@ -895,7 +895,7 @@ const MenuOptions: React.FC<MenuOptionsProps> = ({
                               : ""}{" "}
                             for{" "}
                             <span className="text-primary font-semibold">
-                              "{searchQuery}"
+                              &quot;{searchQuery}&quot;
                             </span>
                           </span>
                         </div>

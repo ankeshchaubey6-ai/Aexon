@@ -367,7 +367,7 @@ const AgencySettingsPage: React.FC<AgencySettingsPageProps> = async ({
                       <div>
                         <CardTitle className="text-base text-white">Agency Configuration</CardTitle>
                         <CardDescription className="text-xs text-white/50">
-                          Manage your agency's core settings and branding
+                          Manage your agency&apos;s core settings and branding
                         </CardDescription>
                       </div>
                     </div>

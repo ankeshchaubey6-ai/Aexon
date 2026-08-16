@@ -18,6 +18,7 @@
  */
 
 
+import { inngest } from "../client";
 import { manifestToInlineStyle } from "@/lib/design-system/manifest-to-css";
 import {
   normalizeImportPath,
@@ -128,8 +129,7 @@ export async function assemblePagesStep(input: AssemblePagesInput): Promise<Asse
     // 3. Generate page index
     const pageIndex = generatePageIndex(resolvedSections);
     files.push({
-      path: `pages/index`,
-      filePath: `pages/index.tsx`,
+      path: `pages/index.tsx`,
       content: pageIndex,
       provenance: "assembly",
     });
@@ -137,8 +137,7 @@ export async function assemblePagesStep(input: AssemblePagesInput): Promise<Asse
     // 4. Generate layout wrapper
     const layout = generateLayout(tokens);
     files.push({
-      path: `layout`,
-      filePath: `layout.tsx`,
+      path: `layout.tsx`,
       content: layout,
       provenance: "assembly",
     });
@@ -346,13 +345,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
  * Inngest event definition
  */
 export const assemblePagesEvent = inngest.createFunction(
-  { id: "assemble-pages" },
-  { event: "ai/assemble-pages" },
+  { id: "assemble-pages", triggers: [{ event: "ai/assemble-pages" }] },
   async ({ event, logger, step }) => {
     logger.info("assemble-pages", { projectId: event.data.projectId });
 
     const result = await step.run("assemble", async () => {
-      return assemblePagesStep(event.data);
+      return assemblePagesStep(event.data as AssemblePagesInput);
     });
 
     return result;

@@ -68,7 +68,13 @@ export function validateFile(
       isValid: false,
       failureCount,
       warningCount,
-      sections: violations,
+      sections: {
+        tokens: { passed: true, violations: [] },
+        content: { passed: true, violations: [] },
+        a11y: { passed: true, violations: [] },
+        imports: { passed: true, violations: [] },
+        integrity: { passed: false, violations: violations.integrity },
+      },
       summary: `CRITICAL: File integrity check failed (${failureCount} errors)`,
     };
   }
@@ -114,6 +120,7 @@ export function validateFile(
   }
 
   const isValid = failureCount === 0;
+  const summaryParts: string[] = [];
   if (violations.content.length > 0) {
     summaryParts.push(`content (${violations.content.length})`);
   }
@@ -130,7 +137,7 @@ export function validateFile(
 
   return {
     fileId: file.path,
-    filePath: file.filePath,
+    filePath: file.path,
     isValid,
     failureCount,
     warningCount,
@@ -139,6 +146,7 @@ export function validateFile(
       content: { passed: violations.content.length === 0, violations: violations.content },
       a11y: { passed: violations.a11y.length === 0, violations: violations.a11y },
       imports: { passed: violations.imports.length === 0, violations: violations.imports },
+      integrity: { passed: violations.integrity.length === 0, violations: violations.integrity },
     },
     summary,
   };

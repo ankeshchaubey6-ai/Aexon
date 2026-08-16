@@ -548,7 +548,7 @@ const UserDetailsForm: React.FC<UserDetailsProps> = ({
                                           <HelpCircle className="w-4 h-4 text-slate-400 hover:text-slate-600 transition-colors" />
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                          <p>Enter the user's complete name</p>
+                                          <p>Enter the user&apos;s complete name</p>
                                         </TooltipContent>
                                       </Tooltip>
                                     </FormLabel>

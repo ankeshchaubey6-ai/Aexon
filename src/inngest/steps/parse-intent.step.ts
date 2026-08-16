@@ -12,6 +12,7 @@
  * Output is validated against SitePlan schema before returning
  */
 
+import { inngest } from "../client";
 import { validateSitePlan } from "@/lib/types/site-plan";
 
 import type { SitePlan } from "@/lib/types/site-plan";
@@ -55,9 +56,11 @@ You MUST output ONLY valid JSON matching this TypeScript interface (no markdown,
             "description": "what this section shows",
             "tags": ["tag1", "tag2"],
             "contentHints": {
-              "headlines": ["primary headline", "secondary"],
-              "ctaLabels": ["button text"],
-              "otherContent": ["any other content hints"]
+              "headline": "primary headline",
+              "subheadline": "supporting text",
+              "bulletPoints": ["any other content hints"],
+              "ctaLabel": "button text",
+              "description": "section-specific copy"
             }
           },
           "order": 0
@@ -131,9 +134,8 @@ export async function parseIntentStep(input: ParseIntentInput): Promise<ParseInt
                 description: "Main hero section with headline",
                 tags: ["hero", "landing"],
                 contentHints: {
-                  headlines: ["Welcome to our platform"],
-                  ctaLabels: ["Get Started"],
-                  otherContent: [],
+                  headline: "Welcome to our platform",
+                  ctaLabel: "Get Started",
                 },
               },
               order: 0,
@@ -145,8 +147,8 @@ export async function parseIntentStep(input: ParseIntentInput): Promise<ParseInt
                 description: "Feature showcase section",
                 tags: ["features", "benefits"],
                 contentHints: {
-                  headlines: ["Our Features"],
-                  otherContent: ["Feature 1", "Feature 2", "Feature 3"],
+                  headline: "Our Features",
+                  bulletPoints: ["Feature 1", "Feature 2", "Feature 3"],
                 },
               },
               order: 1,
@@ -158,7 +160,7 @@ export async function parseIntentStep(input: ParseIntentInput): Promise<ParseInt
                 description: "Call-to-action for signup",
                 tags: ["cta", "conversion"],
                 contentHints: {
-                  ctaLabels: ["Start Free Trial"],
+                  ctaLabel: "Start Free Trial",
                 },
               },
               order: 2,
@@ -190,13 +192,12 @@ export async function parseIntentStep(input: ParseIntentInput): Promise<ParseInt
  * Inngest event definition
  */
 export const parseIntentEvent = inngest.createFunction(
-  { id: "parse-intent" },
-  { event: "ai/parse-intent" },
+  { id: "parse-intent", triggers: [{ event: "ai/parse-intent" }] },
   async ({ event, logger, step }) => {
     logger.info("parse-intent", { projectId: event.data.projectId });
 
     const result = await step.run("parse", async () => {
-      return parseIntentStep(event.data);
+      return parseIntentStep(event.data as ParseIntentInput);
     });
 
     return result;

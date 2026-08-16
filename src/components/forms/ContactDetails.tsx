@@ -228,7 +228,7 @@ const ContactDetails: React.FC<ContactDetailsProps> = ({ subAccountId }) => {
                             <HelpCircle className="w-3 h-3 text-slate-400" />
                           </TooltipTrigger>
                           <TooltipContent side="right">
-                            <p className="text-xs">Contact's full name</p>
+                            <p className="text-xs">Contact&apos;s full name</p>
                           </TooltipContent>
                         </Tooltip>
                       </FormLabel>
@@ -243,7 +243,7 @@ const ContactDetails: React.FC<ContactDetailsProps> = ({ subAccountId }) => {
                         />
                       </FormControl>
                       <FormDescription className="text-xs text-slate-500">
-                        Enter the contact's full name
+                        Enter the contact&apos;s full name
                       </FormDescription>
                       <FormMessage />
                     </FormItem>
@@ -273,7 +273,7 @@ const ContactDetails: React.FC<ContactDetailsProps> = ({ subAccountId }) => {
                         />
                       </FormControl>
                       <FormDescription className="text-xs text-slate-500">
-                        Contact's email address for notifications
+                        Contact&apos;s email address for notifications
                       </FormDescription>
                       <FormMessage />
                     </FormItem>

@@ -222,7 +222,7 @@ const EditorContactForm: React.FC<EditorContactFormProps> = ({
 
               {/* Trust Message */}
               <p className="text-xs text-center text-slate-400 dark:text-slate-500 mt-2">
-                We'll never share your information with third parties
+                We&apos;ll never share your information with third parties
               </p>
             </form>
           </Form>

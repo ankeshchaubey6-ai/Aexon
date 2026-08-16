@@ -18,6 +18,7 @@
  */
 
 
+import { inngest } from "../client";
 import { validateFiles, formatValidationReport } from "@/lib/validators";
 import { checkFileIntegrity, checkFilesIntegrity } from "@/lib/validators/check-integrity";
 
@@ -156,13 +157,12 @@ export async function validateQualityStep(input: ValidateQualityInput) {
  * Inngest event definition
  */
 export const validateQualityEvent = inngest.createFunction(
-  { id: "validate-quality" },
-  { event: "ai/validate-quality" },
+  { id: "validate-quality", triggers: [{ event: "ai/validate-quality" }] },
   async ({ event, logger, step }) => {
     logger.info("validate-quality", { projectId: event.data.projectId });
 
     const result = await step.run("validate", async () => {
-      return validateQualityStep(event.data);
+      return validateQualityStep(event.data as ValidateQualityInput);
     });
 
     return result;

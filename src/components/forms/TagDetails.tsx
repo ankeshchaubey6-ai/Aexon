@@ -105,7 +105,7 @@ const TagDetails: React.FC<TagDetailsProps> = ({
       toast.success(
         <div className="flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-          <span>Tag "{tag.name}" added</span>
+          <span>Tag &quot;{tag.name}&quot; added</span>
         </div>
       );
     }
@@ -150,7 +150,7 @@ const TagDetails: React.FC<TagDetailsProps> = ({
       toast.success(
         <div className="flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-          <span>Tag "{value}" created successfully</span>
+          <span>Tag &quot;{value}&quot; created successfully</span>
         </div>
       );
     } catch (error) {
@@ -170,7 +170,7 @@ const TagDetails: React.FC<TagDetailsProps> = ({
       toast.success(
         <div className="flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-          <span>Tag "{response?.name}" deleted</span>
+          <span>Tag &quot;{response?.name}&quot; deleted</span>
         </div>
       );
 
@@ -338,7 +338,7 @@ const TagDetails: React.FC<TagDetailsProps> = ({
                               Delete Tag
                             </AlertDialogTitle>
                             <AlertDialogDescription className="text-sm">
-                              Are you sure you want to delete "{tag.name}"? This action cannot be undone.
+                              Are you sure you want to delete &quot;{tag.name}&quot;? This action cannot be undone.
                             </AlertDialogDescription>
                           </AlertDialogHeader>
                           <AlertDialogFooter>

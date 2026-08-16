@@ -25,6 +25,7 @@
  */
 
 
+import { inngest } from "../client";
 import { scoreSection } from "@/lib/resolver/score-section";
 import { decideTier } from "@/lib/resolver/decide-tier";
 import { lookupCacheHit, updateCacheWithResolution } from "@/lib/resolver/session-cache";
@@ -33,7 +34,7 @@ import { normalizeImportPath, validateComponentPath } from "@/lib/utils/path-uti
 
 import type { SitePlan, Section } from "@/lib/types/site-plan";
 import type { ComponentMeta } from "@/lib/component-pool/registry/types";
-import type { ResolvedSection, SerializedSessionCache, ResolveComponentsInput } from "@/lib/resolver/types";
+import type { ResolvedSection, SerializedSessionCache } from "@/lib/resolver/types";
 
 export interface ResolveComponentsData {
   projectId: string;
@@ -164,13 +165,12 @@ export async function resolveComponentsStep(data: ResolveComponentsData) {
  * Inngest event definition
  */
 export const resolveComponentsEvent = inngest.createFunction(
-  { id: "resolve-components" },
-  { event: "ai/resolve-components" },
+  { id: "resolve-components", triggers: [{ event: "ai/resolve-components" }] },
   async ({ event, logger, step }) => {
     logger.info("resolve-components", { projectId: event.data.projectId });
 
     const result = await step.run("resolve", async () => {
-      return resolveComponentsStep(event.data);
+      return resolveComponentsStep(event.data as ResolveComponentsData);
     });
 
     return result;

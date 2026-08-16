@@ -63,7 +63,7 @@ export function manifestToJson(manifest: CSSVariableManifest): Record<string, st
   const result: Record<string, string> = {};
 
   for (const [category, tokens] of Object.entries(manifest)) {
-    for (const [name, value] of Object.entries(tokens)) {
+    for (const [name, value] of Object.entries(tokens) as [string, string][]) {
       result[name] = value;
     }
   }
