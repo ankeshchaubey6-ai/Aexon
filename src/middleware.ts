@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 
 export default clerkMiddleware((auth, req) => {
   const url = req.nextUrl;
-  const hostname = req.headers.get("host") || "";
+  // nextUrl.hostname excludes the port, so localhost:3000 and other local
+  // development ports are handled consistently.
+  const hostname = req.nextUrl.hostname.toLowerCase();
 
   const res = NextResponse.next();
 
@@ -21,7 +23,7 @@ export default clerkMiddleware((auth, req) => {
     res.headers.set("Cross-Origin-Embedder-Policy", "credentialless");
   }
 
-  if (hostname === "localhost:3000") {
+  if (hostname === "localhost" || hostname === "127.0.0.1") {
     return res;
   }
 
@@ -33,6 +35,16 @@ export default clerkMiddleware((auth, req) => {
     url.pathname.startsWith("/icons") ||
     url.pathname.includes(".")
   ) {
+    return res;
+  }
+
+  // Vercel deployment and preview hosts are platform domains, not tenant
+  // subdomains. Rewriting aexon-lilac.vercel.app to /aexon-lilac would turn
+  // the application root into a non-existent route.
+  const isVercelHost =
+    hostname === "vercel.app" || hostname.endsWith(".vercel.app");
+
+  if (isVercelHost) {
     return res;
   }
 
