@@ -1,9 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { razorpay } from "@/lib/razorpay";
+import { getRazorpay } from "@/lib/razorpay";
 import { db } from "@/lib/db";
 
 export async function POST(req: NextRequest) {
   try {
+    const razorpay = getRazorpay();
+    if (!razorpay) {
+      return NextResponse.json(
+        {
+          error: "Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to enable payments.",
+          code: "RAZORPAY_NOT_CONFIGURED",
+        },
+        { status: 503 }
+      );
+    }
+
     const body = await req.json();
     const { amount, funnelId, subAccountId } = body as {
       amount: number; // MUST be in paise from frontend
@@ -84,7 +95,7 @@ export async function POST(req: NextRequest) {
       id: order.id,
       amount: amountInPaise,
       currency: "INR",
-      key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
+      key: process.env.RAZORPAY_KEY_ID,
     });
   } catch (error: any) {
     console.error("RAZORPAY_CREATE_ORDER_ERROR:", error);

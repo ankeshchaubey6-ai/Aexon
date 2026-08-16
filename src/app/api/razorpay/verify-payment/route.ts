@@ -1,9 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { db } from "@/lib/db";
+import { isRazorpayConfigured } from "@/lib/razorpay";
 
 export async function POST(req: NextRequest) {
   try {
+    if (!isRazorpayConfigured) {
+      return NextResponse.json(
+        {
+          error: "Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to enable payments.",
+          code: "RAZORPAY_NOT_CONFIGURED",
+        },
+        { status: 503 }
+      );
+    }
+
     const {
       razorpay_order_id,
       razorpay_payment_id,
