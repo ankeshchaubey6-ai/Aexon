@@ -1,8 +1,16 @@
 export const getFunnelUrl = (subDomainName: string, pathName?: string | null) => {
   const path = pathName ? `/${pathName.replace(/^\/+/, "")}` : "/";
+  const isValidValue = (value?: string) => Boolean(
+    value && !["undefined", "null", "your-domain.com"].includes(value.trim().toLowerCase())
+  );
 
   if (typeof window !== "undefined") {
-    const configuredDomain = process.env.NEXT_PUBLIC_DOMAIN;
+    const configuredDomain = isValidValue(process.env.NEXT_PUBLIC_DOMAIN)
+      ? process.env.NEXT_PUBLIC_DOMAIN
+      : undefined;
+    const configuredScheme = isValidValue(process.env.NEXT_PUBLIC_SCHEME)
+      ? process.env.NEXT_PUBLIC_SCHEME
+      : undefined;
     const currentHost = window.location.hostname;
     const baseDomain = configuredDomain && configuredDomain !== "undefined"
       ? configuredDomain
@@ -11,12 +19,16 @@ export const getFunnelUrl = (subDomainName: string, pathName?: string | null) =>
         : currentHost.split(".").length > 2
           ? currentHost.split(".").slice(1).join(".")
           : currentHost;
-    const protocol = configuredDomain && process.env.NEXT_PUBLIC_SCHEME
-      ? `${process.env.NEXT_PUBLIC_SCHEME}:`
+    const protocol = configuredDomain && configuredScheme
+      ? `${configuredScheme}:`
       : window.location.protocol;
     const port = baseDomain === "localhost" && window.location.port
       ? `:${window.location.port}`
       : "";
+
+    if (currentHost.endsWith(".vercel.app")) {
+      return `${window.location.origin}/${subDomainName}${path}`;
+    }
 
     if (baseDomain.endsWith(".vercel.app")) {
       return `${protocol}//${baseDomain}/${subDomainName}${path}`;
@@ -25,8 +37,12 @@ export const getFunnelUrl = (subDomainName: string, pathName?: string | null) =>
     return `${protocol}//${subDomainName}.${baseDomain}${port}${path}`;
   }
 
-  const scheme = process.env.NEXT_PUBLIC_SCHEME || "https";
-  const domain = process.env.NEXT_PUBLIC_DOMAIN || "localhost";
+  const scheme = (isValidValue(process.env.NEXT_PUBLIC_SCHEME)
+    ? process.env.NEXT_PUBLIC_SCHEME
+    : undefined) ?? "https";
+  const domain = (isValidValue(process.env.NEXT_PUBLIC_DOMAIN)
+    ? process.env.NEXT_PUBLIC_DOMAIN
+    : undefined) ?? "localhost";
   const port = domain === "localhost" ? ":3000" : "";
 
   if (domain.endsWith(".vercel.app")) {
