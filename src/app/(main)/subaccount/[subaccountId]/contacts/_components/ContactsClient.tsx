@@ -525,12 +525,12 @@ export default function ContactsClient({
                       </TableCell>
                       <TableCell>
                         {contact.isActive ? (
-                          <Badge className="bg-gradient-to-r from-emerald-500/20 to-teal-500/20 text-emerald-400 border-0 text-[10px] px-1.5 py-0">
+                          <Badge className="!border-emerald-400/30 !bg-emerald-950/80 !text-emerald-200 text-[10px] px-1.5 py-0 shadow-sm shadow-emerald-500/20">
                             <CheckCircle2 className="w-2.5 h-2.5 mr-1" />
                             Active
                           </Badge>
                         ) : (
-                          <Badge className="bg-gradient-to-r from-amber-500/20 to-orange-500/20 text-amber-400 border-0 text-[10px] px-1.5 py-0">
+                          <Badge className="!border-amber-400/30 !bg-amber-950/80 !text-amber-200 text-[10px] px-1.5 py-0 shadow-sm shadow-amber-500/20">
                             <XCircle className="w-2.5 h-2.5 mr-1" />
                             Inactive
                           </Badge>

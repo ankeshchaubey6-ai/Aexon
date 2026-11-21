@@ -56,6 +56,7 @@ Updated: 2026-11-21
 - Rebuilt only `Admission Counselling` into six saved pages: Home, About PIET, Academic Programmes, Admission Process, Admission Enquiry and Thank You.
 - Added local PIET assets under `public/assets/piet-counselling/` with source URLs in `asset-sources.md`.
 - Did not modify the B.Tech funnel, other funnels, other sub-accounts or GitHub.
+- PIET visual refinement: rebuilt the counselling pages around the official site’s observed deep-blue, institutional-green and orange accent palette, with structured header, hero, programme grid, gallery, timeline, enquiry block and footer instead of loose text/image stacking.
 - Pipeline presentation/performance update: added a first-time-user stage explainer, live opportunity/value summary, clearer admission-opportunity cards and optimistic drag-and-drop updates.
 - Pipeline page loading now uses one authorized workspace query instead of separate repeated pipeline/lanes/sub-account fetches.
 - Pipeline TypeScript check: passed; tests: passed (12 tests).
