@@ -59,6 +59,8 @@ Updated: 2026-11-22
 - Added a dedicated Campus & Student Experience page with balanced landscape image layouts and captions.
 - Updated the Thank You page to confirm the enquiry was successfully recorded in the demonstration workspace, with working Home and Explore Programmes actions.
 - Refined the visual system with lighter logo-matched greens, a cropped/aligned PIET header logo, consistent 4:3 image framing, and improved hero/programme image composition.
+- Published the target `Admission Counselling` funnel at subdomain `piet-counselling-2026` and replaced the old plain-text header navigation with saved link elements for Home, About, Programmes, Campus Life, Admission Process and Counselling.
+- Verified the target funnel is `published: true` with seven ordered pages; B.Tech and other funnels were not changed.
 - Kept the existing Aexon contact form integration intact: it persists the supported name/email contact fields and advances only after the save succeeds. Additional counselling questions remain a future schema/editor enhancement because the current Contact model supports only name and email.
 - Latest funnel rebuild script check: `node --check scripts/rebuild-piet-style.mjs` passed.
 - PIET visual refinement: converted the counselling pages to a green-led palette (`#008F52`, `#075B3B`, `#EAF6EF`, `#F7FAF8`, `#F39A32`) with structured header, hero, programme grid, campus gallery, timeline, enquiry block and footer instead of loose text/image stacking.
