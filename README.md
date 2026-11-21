@@ -1,3 +1,67 @@
+# AI Continuation Handoff
+
+Updated: 2026-11-21
+
+## Current status
+
+- Piet admission demo implementation has **not started**; audit is in progress.
+- Target: configured demo account → `Vertex Solutions` → `Piet Admission`.
+- The app is a Next.js 14 + Prisma/MySQL + Clerk SaaS with contacts, pipeline, media, funnels and a page builder.
+- Do not seed data until the authenticated user, agency and sub-account are resolved by real database IDs and confirmed.
+- Do not modify other agencies/sub-accounts or create a new Clerk account/agency.
+- Target database lookup succeeded using `.env.local`.
+
+## Work completed in this session
+
+- Inspected the repository, package scripts and supplied master prompt.
+- Confirmed commands: `npm run dev`, `npm run build`, `npm run lint`, `npm test`.
+- Added this handoff section for the next AI.
+- Audited Prisma models, app routes, auth layouts, CRUD queries and funnel rendering.
+- Confirmed the schema has `User → Agency → SubAccount`, plus contacts, tickets/lanes, media, funnels and funnel pages.
+- Found several server actions/queries that trust caller-supplied IDs without repeating tenant authorization; this must be fixed before demo seeding.
+- Found the sub-account dashboard uses a hardcoded `12.5%` growth value and does not yet calculate contact/pipeline metrics from the database.
+- Added `assertSubAccountAccess` and applied it to core sub-account, contact, funnel, media and pipeline reads/writes.
+- Added database-derived dashboard metrics for contact count, ticket count, pipeline value, closed value and conversion rate.
+- Seeded only the verified target with the idempotent `scripts/seed-piet-demo.mjs` script.
+- Seed result: 15 `[DEMO]` contacts, 9 `[DEMO]` tickets, 3 `[DEMO]` lanes, 2 `[DEMO]` funnels and 8 `[DEMO]` funnel pages.
+- Preserved the 3 existing media records and all existing non-demo records.
+- Re-ran the seed successfully; counts stayed unchanged.
+- Existing `[DEMO]` contacts were found in four other sub-accounts; this seed did not create or modify them.
+
+## Next actions
+
+1. Audit `prisma/schema.prisma`, auth, tenant authorization, contacts, pipeline, media, funnels and the page editor.
+2. Resolve and display exact Clerk user, Prisma user, agency and sub-account IDs; ask for confirmation before inserts.
+3. Add idempotent, `[DEMO]`-marked records only for `Piet admission`.
+4. Verify dynamic metrics, CRUD persistence, funnel pages, enquiry creation and tenant isolation.
+5. Run checks and record actual results below.
+
+## Verification log
+
+- Prisma validation: passed
+- TypeScript: passed (`npx tsc --noEmit`)
+- Lint: passed with existing warnings
+- Tests: passed (1 file, 12 tests)
+- Build: passed; existing lint/image/hook warnings and expected dynamic-route messages remain
+- Tenant hardening compile check: passed
+- Dashboard metric compile check: passed
+- Demo seed: passed; idempotency and target isolation checked
+
+## Continuation notes
+
+- Read the user-provided master prompt before implementation; it contains the acceptance criteria.
+- Inspect existing models/routes before assuming field names or URL paths.
+- Keep secrets out of documentation and source code.
+- Preserve the pre-existing deleted `prisma/dev.db` worktree change.
+- Do not claim target resolution until the database connection works and the exact IDs are printed.
+- Verified target (read-only, no seed yet):
+  - User: configured demo account / role `AGENCY_OWNER`
+  - Agency: `Vertex Solutions`
+  - Sub-account: `Piet Admission`
+  - Relationship verified: user agency and sub-account agency relationships match.
+
+---
+
 # SaaS Website Builder, Project Management And Dashboard With Stripe using Nextjs14, Bun, Stripe Connect, Prisma, MySQL, Tailwind
 
 ![Application Logo](https://storage.googleapis.com/msgsndr/0wtSXexlPhMN1945ooxW/media/65b7c3d24660477daf3d6708.png)

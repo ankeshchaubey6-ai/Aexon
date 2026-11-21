@@ -48,6 +48,7 @@ import {
 
 import { getSubAccountDetails } from "@/queries/subaccount";
 import { getFunnels } from "@/queries/funnels";
+import { getSubAccountDashboardMetrics } from "@/queries/dashboard";
 
 import { AreaChart } from "@/components/ui/area-chart";
 import {
@@ -114,7 +115,10 @@ const SubAccountPageId: React.FC<SubAccountPageIdProps> = async ({
 
   // TODO: Implement Razorpay order fetching
 
-  const funnels = await getFunnels(subaccountId);
+  const [funnels, metrics] = await Promise.all([
+    getFunnels(subaccountId),
+    getSubAccountDashboardMetrics(subaccountId),
+  ]);
 
   const funnelPerformanceMetrics = funnels.map((funnel) => ({
     ...funnel,
@@ -133,8 +137,12 @@ const SubAccountPageId: React.FC<SubAccountPageIdProps> = async ({
       .slice(0, 2);
   };
 
-  const monthlyGrowth = 12.5;
   const activeFunnels = funnels.length;
+  const totalPipelineValue = metrics.totalValue;
+  const closedPipelineValue = metrics.closedValue;
+  net = metrics.closedValue;
+  potentialIncome = metrics.totalValue;
+  closingRate = metrics.conversionRate;
   const totalVisits = funnelPerformanceMetrics.reduce(
     (total, funnel) => total + funnel.totalFunnelVisits,
     0
@@ -287,8 +295,8 @@ const SubAccountPageId: React.FC<SubAccountPageIdProps> = async ({
             <div className="bg-white/5 backdrop-blur-sm rounded-lg p-3 border border-white/10">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-[10px] text-white/50">Monthly Growth</p>
-                  <p className="text-base font-bold text-white mt-0.5">+{monthlyGrowth}%</p>
+                  <p className="text-[10px] text-white/50">Total Contacts</p>
+                  <p className="text-base font-bold text-white mt-0.5">{metrics.contactCount}</p>
                 </div>
                 <div className="p-1.5 rounded-lg bg-gradient-to-r from-emerald-500/20 to-teal-500/20">
                   <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
@@ -349,7 +357,7 @@ const SubAccountPageId: React.FC<SubAccountPageIdProps> = async ({
                       <div className="flex items-center gap-2 mt-1">
                         <span className="text-[10px] text-emerald-400 flex items-center">
                           <ArrowUpRight className="w-2.5 h-2.5" />
-                          +{monthlyGrowth}%
+                          {metrics.contactCount} contacts
                         </span>
                         <span className="text-[10px] text-white/30">vs last month</span>
                       </div>
@@ -407,7 +415,7 @@ const SubAccountPageId: React.FC<SubAccountPageIdProps> = async ({
                           <p className="text-sm font-semibold text-white">₹0</p>
                         </div>
                       </div>
-                      <Progress value={0} className="h-1 mt-2 bg-white/10 [&>div]:bg-gradient-to-r [&>div]:from-emerald-500 [&>div]:to-teal-500" />
+                      <Progress value={metrics.conversionRate} className="h-1 mt-2 bg-white/10 [&>div]:bg-gradient-to-r [&>div]:from-emerald-500 [&>div]:to-teal-500" />
                       <p className="text-[10px] text-white/30 mt-2 leading-tight">
                         Total value of all tickets except last lane
                       </p>
@@ -438,7 +446,7 @@ const SubAccountPageId: React.FC<SubAccountPageIdProps> = async ({
                       <div className="flex items-center gap-4 mt-2">
                         <div className="flex items-center gap-1">
                           <ShoppingCart className="w-3 h-3 text-emerald-400" />
-                          <span className="text-xs text-white">{totalClosedSessions?.length || 0}</span>
+                          <span className="text-xs text-white">{metrics.closedCount}</span>
                         </div>
                         <div className="flex items-center gap-1">
                           <XCircle className="w-3 h-3 text-rose-400" />

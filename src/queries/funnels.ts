@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import type { FunnelDetailsSchema } from "@/lib/validators/funnel-details";
 import type { Prisma } from "@prisma/client";
 import { revalidatePath } from "next/cache";
+import { assertSubAccountAccess } from "@/lib/auth/tenant";
 
 /**
  * Get all funnels for a subaccount
@@ -16,6 +17,7 @@ export const getFunnels = async (subAccountId: string) => {
   }
 
   try {
+    await assertSubAccountAccess(subAccountId);
     const response = await db.funnel.findMany({
       where: { subAccountId },
       include: {
@@ -53,6 +55,8 @@ export const getFunnel = async (funnelId: string) => {
       },
     });
 
+    if (response) await assertSubAccountAccess(response.subAccountId);
+
     return response;
   } catch (error) {
     console.error("[getFunnel] ERROR:", error);
@@ -88,6 +92,7 @@ export const upsertFunnel = async (
   }
 
   try {
+    await assertSubAccountAccess(subAccountId);
     console.log("[upsertFunnel] START", {
       subAccountId,
       funnelId,
@@ -148,6 +153,13 @@ export const updateFunnelProducts = async (
   }
 
   try {
+    const funnel = await db.funnel.findUnique({
+      where: { id: funnelId },
+      select: { subAccountId: true },
+    });
+    if (!funnel) throw new Error("Funnel not found");
+    await assertSubAccountAccess(funnel.subAccountId);
+
     let parsed = "[]";
     try {
       parsed = products ? JSON.stringify(JSON.parse(products)) : "[]";
@@ -185,6 +197,13 @@ export const upsertFunnelPage = async (
   }
 
   try {
+    await assertSubAccountAccess(subAccountId);
+    const funnel = await db.funnel.findFirst({
+      where: { id: funnelId, subAccountId },
+      select: { id: true },
+    });
+    if (!funnel) throw new Error("Funnel not found");
+
     const pageId = funnelPage.id || uuidv4();
 
     const response = await db.funnelPage.upsert({

@@ -3,6 +3,7 @@
 import { db } from "@/lib/db";
 import { Role } from "@prisma/client";
 import { v4 as uuidv4 } from "uuid";
+import { assertSubAccountAccess } from "@/lib/auth/tenant";
 
 // 🔥 DTO (Serializable for Next.js Server Actions)
 export interface UpsertSubAccountPayload {
@@ -71,6 +72,7 @@ export const getSubAccountDetails = async (subAccountId: string) => {
   if (!subAccountId) return null;
 
   try {
+    await assertSubAccountAccess(subAccountId);
     const result = await db.subAccount.findUnique({
       where: { id: subAccountId },
     });

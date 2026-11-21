@@ -2,6 +2,7 @@
 
 import { db } from "@/lib/db";
 import { v4 as uuidv4 } from "uuid";
+import { assertSubAccountAccess } from "@/lib/auth/tenant";
 
 /**
  * 🔥 PRODUCTION FIXED (MySQL Safe)
@@ -22,6 +23,8 @@ export const searchContacts = async (
     // we should still return recent contacts (fixes "customer option removed" issue)
     if (!safeSearch) {
       if (!subAccountId) return [];
+
+      await assertSubAccountAccess(subAccountId);
 
       return await db.contact.findMany({
         where: {
@@ -70,6 +73,7 @@ export const getSubAccountWithContacts = async (subAccountId: string) => {
   if (!subAccountId) return null;
 
   try {
+    await assertSubAccountAccess(subAccountId);
     return await db.subAccount.findUnique({
       where: {
         id: subAccountId,
@@ -115,6 +119,8 @@ export const upsertContact = async (contact: {
     if (!contact?.subAccountId) {
       throw new Error("subAccountId is required");
     }
+
+    await assertSubAccountAccess(contact.subAccountId);
 
     // 🔥 SAFE STRING HANDLING (prevents trim/undefined crash)
     const safeName = (contact?.name ?? "").toString().trim();

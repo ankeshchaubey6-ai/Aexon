@@ -4,9 +4,11 @@ import { db } from "@/lib/db";
 import { v4 } from "uuid";
 import { Prisma } from "@prisma/client";
 import { revalidatePath } from "next/cache";
+import { assertSubAccountAccess } from "@/lib/auth/tenant";
 
 export const getUserPipelines = async (subAccountId: string) => {
   if (!subAccountId) return [];
+  await assertSubAccountAccess(subAccountId);
   return await db.pipeline.findMany({
     where: { subAccountId },
     orderBy: { createdAt: "desc" },
@@ -15,6 +17,7 @@ export const getUserPipelines = async (subAccountId: string) => {
 
 export const getPipelines = async (subAccountId: string) => {
   if (!subAccountId) return [];
+  await assertSubAccountAccess(subAccountId);
 
   return await db.pipeline.findMany({
     where: { subAccountId },
@@ -47,6 +50,8 @@ export const createPipeline = async (subAccountId: string) => {
   if (!subAccountId) {
     throw new Error("subAccountId is required");
   }
+
+  await assertSubAccountAccess(subAccountId);
 
   const response = await db.pipeline.create({
     data: {

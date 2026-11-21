@@ -3,6 +3,7 @@
 import { db } from "@/lib/db";
 import { CreateMediaType } from "@/lib/types";
 import { revalidatePath } from "next/cache";
+import { assertSubAccountAccess } from "@/lib/auth/tenant";
 
 /**
  * Get all media for a subaccount
@@ -14,6 +15,7 @@ export const getMedia = async (subAccountId: string) => {
   }
 
   try {
+    await assertSubAccountAccess(subAccountId);
     const mediaFiles = await db.subAccount.findUnique({
       where: {
         id: subAccountId,
@@ -56,6 +58,7 @@ export const createMedia = async (
   }
 
   try {
+    await assertSubAccountAccess(subAccountId);
     console.log("[createMedia] START:", {
       subAccountId,
       name,
