@@ -86,7 +86,10 @@ const FunnelEditor: React.FC<FunnelEditorProps> = ({
   return (
     <div
       className={cn(
-        "h-full w-full overflow-y-hidden overflow-x-hidden bg-background relative",
+        "w-full overflow-x-hidden bg-background relative",
+        editor.editor.liveMode
+          ? "min-h-screen h-auto overflow-y-visible"
+          : "h-full overflow-y-hidden",
         {
           "p-0": editor.editor.previewMode || editor.editor.liveMode,
           "!w-[850px] mx-auto": editor.editor.device === "Tablet",
