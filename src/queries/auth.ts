@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { clerkClient, currentUser } from "@clerk/nextjs/server";
 import { Role, type User } from "@prisma/client";
 import { logger } from "@/lib/utils";
+import { cache } from "react";
 
 export const getAuthUser = async (email: string) => {
   try {
@@ -23,7 +24,7 @@ export const getAuthUser = async (email: string) => {
   }
 };
 
-export const getAuthUserDetails = async () => {
+export const getAuthUserDetails = cache(async () => {
   const user = await currentUser();
 
   if (!user) {
@@ -54,7 +55,7 @@ export const getAuthUserDetails = async () => {
   });
 
   return userData;
-};
+});
 
 export const getAuthUserGroup = async (agencyId: string) => {
   const teamMembers = await db.user.findMany({

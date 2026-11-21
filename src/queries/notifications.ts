@@ -115,12 +115,22 @@ export const getNotification = async (agencyId: string) => {
       where: {
         agencyId,
       },
-      include: {
-        user: true,
+      select: {
+        id: true,
+        createdAt: true,
+        updatedAt: true,
+        notification: true,
+        agencyId: true,
+        subAccountId: true,
+        userId: true,
+        user: {
+          select: { id: true, name: true, avatarUrl: true, email: true },
+        },
       },
       orderBy: {
         createdAt: "desc",
       },
+      take: 100,
     });
 
     return response as NotificationsWithUser;

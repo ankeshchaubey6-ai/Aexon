@@ -6,6 +6,39 @@ import { Prisma } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import { assertSubAccountAccess } from "@/lib/auth/tenant";
 
+export const getPipelineWorkspace = async (
+  subAccountId: string,
+  pipelineId: string
+) => {
+  await assertSubAccountAccess(subAccountId);
+
+  const [pipelineDetails, allPipelines, lanes, subaccount] = await Promise.all([
+    db.pipeline.findFirst({
+      where: { id: pipelineId, subAccountId },
+    }),
+    db.pipeline.findMany({
+      where: { subAccountId },
+      orderBy: { createdAt: "desc" },
+    }),
+    db.lane.findMany({
+      where: { pipelineId, pipeline: { subAccountId } },
+      orderBy: { order: "asc" },
+      include: {
+        tickets: {
+          orderBy: { order: "asc" },
+          include: { tags: true, customer: true, assigned: true },
+        },
+      },
+    }),
+    db.subAccount.findUnique({
+      where: { id: subAccountId },
+      select: { id: true, name: true },
+    }),
+  ]);
+
+  return { pipelineDetails, allPipelines, lanes, subaccount };
+};
+
 export const getUserPipelines = async (subAccountId: string) => {
   if (!subAccountId) return [];
   await assertSubAccountAccess(subAccountId);
@@ -41,9 +74,11 @@ export const getPipelines = async (subAccountId: string) => {
 
 export const getPipelineDetails = async (pipelineId: string) => {
   if (!pipelineId) return null;
-  return await db.pipeline.findUnique({
+  const pipeline = await db.pipeline.findUnique({
     where: { id: pipelineId },
   });
+  if (pipeline) await assertSubAccountAccess(pipeline.subAccountId);
+  return pipeline;
 };
 
 export const createPipeline = async (subAccountId: string) => {

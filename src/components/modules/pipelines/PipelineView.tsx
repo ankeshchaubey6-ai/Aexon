@@ -1,7 +1,6 @@
 "use client";
 
 import React from "react";
-import { useRouter } from "next/navigation";
 import {
   DragDropContext,
   Droppable,
@@ -39,7 +38,6 @@ const PipelineView: React.FC<PipelineViewProps> = ({
   updateLanesOrder,
   updateTicketsOrder,
 }) => {
-  const router = useRouter();
   const { setOpen } = useModal();
 
   const [allLanes, setAllLanes] = React.useState<LaneDetailsType[]>(lanes);
@@ -60,6 +58,17 @@ const PipelineView: React.FC<PipelineViewProps> = ({
       </CustomModal>
     );
   };
+
+  const totalValue = allLanes.reduce(
+    (sum, lane) => sum + lane.tickets.reduce((laneSum, ticket) => laneSum + Number(ticket.value ?? 0), 0),
+    0
+  );
+  const totalTickets = allLanes.reduce((sum, lane) => sum + lane.tickets.length, 0);
+  const stageCopy = [
+    "Fresh enquiries that still need a first response.",
+    "Students who have been contacted and are being guided.",
+    "Qualified or completed admission conversations.",
+  ];
 
   const onDragEnd = async (dropResult: DropResult) => {
     const { destination, source, type } = dropResult;
@@ -84,7 +93,6 @@ const PipelineView: React.FC<PipelineViewProps> = ({
 
       setAllLanes(newLanes);
       await updateLanesOrder(newLanes);
-      router.refresh();
       return;
     }
 
@@ -131,7 +139,6 @@ const PipelineView: React.FC<PipelineViewProps> = ({
         ]);
       }
 
-      router.refresh();
     }
   };
 
@@ -150,6 +157,24 @@ const PipelineView: React.FC<PipelineViewProps> = ({
             <Plus className="w-4 h-4" />
             Create Lane
           </Button>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/5 md:grid-cols-3">
+          {allLanes.slice(0, 3).map((lane, index) => (
+            <div key={lane.id} className="flex items-start gap-3">
+              <span className="mt-1 h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: lane.color }} />
+              <div>
+                <p className="text-sm font-semibold">{index + 1}. {lane.name}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{stageCopy[index] ?? "Track the next action for this stage."}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span className="rounded-full bg-slate-100 px-3 py-1.5 dark:bg-white/10">{totalTickets} active opportunities</span>
+          <span className="rounded-full bg-slate-100 px-3 py-1.5 dark:bg-white/10">₹{totalValue.toLocaleString("en-IN")} total value</span>
+          <span className="rounded-full bg-slate-100 px-3 py-1.5 dark:bg-white/10">Drag a card to update its stage</span>
         </div>
 
         <Droppable

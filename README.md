@@ -52,6 +52,14 @@ Updated: 2026-11-21
 - Latest TypeScript check: passed
 - Latest tests: passed (12 tests)
 - Latest production build: passed with existing lint warnings
+- Local-only counselling rebuild: completed on 2026-11-22.
+- Rebuilt only `Admission Counselling` into six saved pages: Home, About PIET, Academic Programmes, Admission Process, Admission Enquiry and Thank You.
+- Added local PIET assets under `public/assets/piet-counselling/` with source URLs in `asset-sources.md`.
+- Did not modify the B.Tech funnel, other funnels, other sub-accounts or GitHub.
+- Pipeline presentation/performance update: added a first-time-user stage explainer, live opportunity/value summary, clearer admission-opportunity cards and optimistic drag-and-drop updates.
+- Pipeline page loading now uses one authorized workspace query instead of separate repeated pipeline/lanes/sub-account fetches.
+- Pipeline TypeScript check: passed; tests: passed (12 tests).
+- Site-wide speed pass: request-scoped auth caching added, notification payloads capped to the latest 100 records, and pipeline page data consolidated into one authorized workspace fetch.
 
 ## Continuation notes
 

@@ -149,10 +149,13 @@ const PipelineTicket: React.FC<PipelineTicketProps> = ({
           >
             <AlertDialog>
               <DropdownMenu>
-                <Card className="my-4 dark:bg-background bg-white shadow-none transition-all">
+                <Card className="my-4 border-l-4 border-l-[#0c5b8f] bg-white shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg dark:bg-background">
                   <CardHeader className="p-3">
                     <CardTitle className="flex items-center justify-between">
-                      <span className="text-lg w-full">{ticket.name}</span>
+                      <div className="w-full pr-2">
+                        <span className="block text-base font-bold leading-tight">{ticket.name}</span>
+                        <span className="mt-1 block text-[10px] font-semibold uppercase tracking-[0.16em] text-[#0c5b8f]">Admission opportunity</span>
+                      </div>
                       <DropdownMenuTrigger>
                         <MoreHorizontal className="text-muted-foreground" />
                       </DropdownMenuTrigger>
@@ -169,7 +172,7 @@ const PipelineTicket: React.FC<PipelineTicketProps> = ({
                         />
                       ))}
                     </div>
-                    <CardDescription className="w-full">
+                    <CardDescription className="w-full text-sm leading-relaxed">
                       {ticket.description}
                     </CardDescription>
                     <HoverCard>
@@ -207,7 +210,7 @@ const PipelineTicket: React.FC<PipelineTicketProps> = ({
                     </HoverCard>
                   </CardHeader>
 
-                  <CardFooter className="m-0 p-2 border-t border-muted-foreground/20 flex items-center justify-between">
+                  <CardFooter className="m-0 flex items-center justify-between border-t border-muted-foreground/20 p-3">
                     <div className="flex items-center gap-2">
                       <Avatar className="w-7 h-7">
                         <AvatarImage
@@ -232,11 +235,10 @@ const PipelineTicket: React.FC<PipelineTicketProps> = ({
                         )}
                       </div>
                     </div>
-                    {!!ticket.value && (
-                      <span className="text-sm font-bold">
-                        {formatPrice(+ticket.value)}
-                      </span>
-                    )}
+                    <div className="text-right">
+                      <span className="block text-[10px] uppercase tracking-wide text-muted-foreground">Opportunity value</span>
+                      {!!ticket.value && <span className="text-base font-bold text-[#0c5b8f]">{formatPrice(+ticket.value)}</span>}
+                    </div>
                   </CardFooter>
                   <DropdownMenuContent>
                     <DropdownMenuLabel>Options</DropdownMenuLabel>

@@ -22,13 +22,8 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { getPipelineDetails, getUserPipelines } from "@/queries/pipelines";
-import {
-  getLanesWithTicketsAndTags,
-  updateLanesOrder,
-  updateTicketsOrder,
-} from "@/queries/lanes";
-import { getSubAccountDetails } from "@/queries/subaccount";
+import { getPipelineWorkspace } from "@/queries/pipelines";
+import { updateLanesOrder, updateTicketsOrder } from "@/queries/lanes";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -54,12 +49,8 @@ const PipelineIdPage: React.FC<PipelineIdPageProps> = async ({ params }) => {
   if (!subaccountId) redirect(`/subaccount/unauthorized`);
   if (!pipelineId) redirect(`/subaccount/${subaccountId}/pipelines`);
 
-  const [pipelineDetails, allPipelines, lanes, subaccount] = await Promise.all([
-    getPipelineDetails(pipelineId),
-    getUserPipelines(subaccountId),
-    getLanesWithTicketsAndTags(pipelineId),
-    getSubAccountDetails(subaccountId)
-  ]);
+  const { pipelineDetails, allPipelines, lanes, subaccount } =
+    await getPipelineWorkspace(subaccountId, pipelineId);
 
   if (!pipelineDetails) {
     redirect(`/subaccount/${subaccountId}/pipelines`);
