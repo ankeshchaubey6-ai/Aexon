@@ -1,7 +1,7 @@
 import { Role } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { getAuthUserDetails } from "@/queries/auth";
+import { getAuthUserAccess } from "@/queries/auth";
 
 /**
  * Server-side tenant guard for actions and queries receiving IDs from the
@@ -11,11 +11,11 @@ import { getAuthUserDetails } from "@/queries/auth";
 export const assertSubAccountAccess = async (subAccountId: string) => {
   if (!subAccountId) throw new Error("subAccountId is required");
 
-  const user = await getAuthUserDetails();
-  if (!user?.agency) throw new Error("Not authorized");
+  const user = await getAuthUserAccess();
+  if (!user?.agencyId) throw new Error("Not authorized");
 
   const subAccount = await db.subAccount.findFirst({
-    where: { id: subAccountId, agencyId: user.agency.id },
+    where: { id: subAccountId, agencyId: user.agencyId },
     select: { id: true, agencyId: true },
   });
 
@@ -24,8 +24,7 @@ export const assertSubAccountAccess = async (subAccountId: string) => {
   const isAgencyAdmin =
     user.role === Role.AGENCY_OWNER || user.role === Role.AGENCY_ADMIN;
   const hasPermission = user.permissions.some(
-    (permission) =>
-      permission.access && permission.subAccountId === subAccountId
+    (permission) => permission.subAccountId === subAccountId
   );
 
   if (!isAgencyAdmin && !hasPermission) throw new Error("Not authorized");

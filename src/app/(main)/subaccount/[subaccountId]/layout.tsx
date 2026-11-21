@@ -58,18 +58,17 @@ const SubAccountIdLayout: React.FC<SubAccountIdLayoutProps> = async ({
     }
   }
 
-  const allNotifications = await getNotification(authUser.agency.id);
+  const allNotifications = await getNotification(
+    authUser.agency.id,
+    isOwnerOrAdmin ? undefined : subaccountId
+  );
 
   let notifications: NotificationsWithUser = [];
 
   if (isOwnerOrAdmin) {
     notifications = allNotifications || [];
   } else {
-    notifications =
-      allNotifications?.filter(
-        (notification) =>
-          notification.subAccountId === subaccountId
-      ) || [];
+    notifications = allNotifications || [];
   }
 
   return (

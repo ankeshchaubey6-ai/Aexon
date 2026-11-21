@@ -64,6 +64,8 @@ Updated: 2026-11-22
 - Rebuilt only `B.Tech Admission Enquiry` (`c3c2c3c0-3000-4d00-9000-000000000001`) into a futuristic four-page admissions microsite: Home, Courses, Enquiry and Thank You. It uses the existing Aexon page system, local PIET assets, connected navigation, a structured enquiry panel and is published.
 - Refined the B.Tech microsite with a clearer PIET brand lockup/name, richer image gallery, brighter green/cyan/orange accents, animated image/card transitions using existing global motion utilities, and stronger PIET labels across the header and calls to action.
 - Translated the supplied PIET generator brief into the real Aexon renderer: added About PIET context, a four-step admission journey, student FAQs, verified branch guidance, official-address context and academic-demo disclaimers without changing the renderer schema.
+- Performance optimization pass: mutation authorization now uses a minimal access query; funnel list/dashboard queries exclude full page JSON; notifications filter by sub-account in SQL; and funnel manager reads exclude page content/payment relations unless the editor actually requests them.
+- Verification: TypeScript passed, 12 tests passed, and production build passed with existing image/hook warnings and expected dynamic API-route messages.
 - Fixed deployed funnel URL generation so missing environment variables no longer produce `undefined://...undefined`; dashboard links now derive protocol/host/port safely and form success stays on the current funnel host.
 
 ## Funnel deployment notes

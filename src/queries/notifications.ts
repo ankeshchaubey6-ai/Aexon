@@ -2,7 +2,6 @@
 
 import { db } from "@/lib/db";
 import { logger } from "@/lib/utils";
-import { currentUser } from "@clerk/nextjs/server";
 import { type NotificationsWithUser } from "@/lib/types";
 
 export const saveActivityLogsNotification = async ({
@@ -14,60 +13,23 @@ export const saveActivityLogsNotification = async ({
   subAccountId?: string;
   description: string;
 }) => {
-  const authUser = await currentUser();
-  let userData;
-
-  if (!authUser) {
-    const response = await db.user.findFirst({
-      where: {
-        agency: {
-          subAccounts: {
-            some: {
-              id: subAccountId,
-            },
-          },
-        },
-      },
-    });
-
-    if (response) {
-      userData = response;
-    }
-  } else {
-    const response = await db.user.findUnique({
-      where: {
-        email: authUser.emailAddresses[0].emailAddress,
-      },
-    });
-
-    if (response) {
-      userData = response;
-    }
+  if (!agencyId && !subAccountId) {
+    throw new Error("You need to provide at least an agency id or subaccount id");
   }
+
+  const userData = await db.user.findFirst({
+    where: subAccountId
+      ? { agency: { subAccounts: { some: { id: subAccountId } } } }
+      : { agencyId: agencyId ?? undefined },
+    select: { id: true, name: true, agencyId: true },
+  });
 
   if (!userData) {
     throw new Error("Could not find a user");
   }
 
-  let foundAgencyId = agencyId;
-
-  if (!foundAgencyId) {
-    if (!subAccountId) {
-      throw new Error(
-        "You need to provide at least an agency id or subaccount id"
-      );
-    }
-
-    const response = await db.subAccount.findUnique({
-      where: {
-        id: subAccountId,
-      },
-    });
-
-    if (response) {
-      foundAgencyId = response.agencyId;
-    }
-  }
+  const foundAgencyId = agencyId ?? userData.agencyId;
+  if (!foundAgencyId) throw new Error("Could not resolve the agency for this activity");
 
   if (subAccountId) {
     await db.notification.create({
@@ -109,11 +71,12 @@ export const saveActivityLogsNotification = async ({
   }
 };
 
-export const getNotification = async (agencyId: string) => {
+export const getNotification = async (agencyId: string, subAccountId?: string) => {
   try {
     const response = await db.notification.findMany({
       where: {
         agencyId,
+        ...(subAccountId ? { subAccountId } : {}),
       },
       select: {
         id: true,

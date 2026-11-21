@@ -20,9 +20,27 @@ export const getFunnels = async (subAccountId: string) => {
     await assertSubAccountAccess(subAccountId);
     const response = await db.funnel.findMany({
       where: { subAccountId },
-      include: {
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        published: true,
+        subDomainName: true,
+        favicon: true,
+        subAccountId: true,
+        liveProducts: true,
+        createdAt: true,
+        updatedAt: true,
         funnelPages: {
           orderBy: { order: "asc" },
+          select: {
+            id: true,
+            name: true,
+            pathName: true,
+            order: true,
+            visits: true,
+            updatedAt: true,
+          },
         },
       },
       orderBy: { createdAt: "desc" },
@@ -47,11 +65,31 @@ export const getFunnel = async (funnelId: string) => {
   try {
     const response = await db.funnel.findUnique({
       where: { id: funnelId },
-      include: {
+      select: {
+        id: true,
+        createdAt: true,
+        updatedAt: true,
+        name: true,
+        description: true,
+        published: true,
+        subDomainName: true,
+        favicon: true,
+        subAccountId: true,
+        liveProducts: true,
         funnelPages: {
           orderBy: { order: "asc" },
+          select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            name: true,
+            pathName: true,
+            visits: true,
+            order: true,
+            previewImage: true,
+            funnelId: true,
+          },
         },
-        payments: true,
       },
     });
 

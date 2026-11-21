@@ -57,6 +57,30 @@ export const getAuthUserDetails = cache(async () => {
   return userData;
 });
 
+/**
+ * Lightweight authorization lookup for server actions.
+ * The full auth query intentionally loads navigation/account relations for
+ * layouts, but mutations only need role, agency and accessible sub-account IDs.
+ */
+export const getAuthUserAccess = cache(async () => {
+  const user = await currentUser();
+
+  if (!user) return;
+
+  return db.user.findUnique({
+    where: { email: user.emailAddresses[0].emailAddress },
+    select: {
+      id: true,
+      role: true,
+      agencyId: true,
+      permissions: {
+        where: { access: true },
+        select: { subAccountId: true },
+      },
+    },
+  });
+});
+
 export const getAuthUserGroup = async (agencyId: string) => {
   const teamMembers = await db.user.findMany({
     where: {

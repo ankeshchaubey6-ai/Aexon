@@ -40,6 +40,7 @@ import FunnelSteps from "@/components/modules/funnels/FunnelSteps";
 import { cn, constructMetadata } from "@/lib/utils";
 import { buttonVariants } from "@/components/ui/button";
 import { FunnelsForSubAccount } from "@/lib/types";
+import type { FunnelPage } from "@prisma/client";
 
 interface FunnelIdPageProps {
   params: {
@@ -305,7 +306,7 @@ const FunnelIdPage: React.FC<FunnelIdPageProps> = async ({ params }) => {
                   <FunnelSteps
                     funnel={funnelPages}
                     subAccountId={subaccountId}
-                    initialPages={funnelPages.funnelPages}
+                    initialPages={funnelPages.funnelPages as FunnelPage[]}
                     funnelId={funnelId}
                   />
                 </TabsContent>
