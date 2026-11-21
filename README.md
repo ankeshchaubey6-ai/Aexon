@@ -68,6 +68,8 @@ Updated: 2026-11-22
 For local use, set `NEXT_PUBLIC_SCHEME=http`, `NEXT_PUBLIC_DOMAIN=localhost`, and open `http://<subdomain>.localhost:3000/`.
 
 For a real deployment, set `NEXT_PUBLIC_SCHEME=https` and `NEXT_PUBLIC_DOMAIN=your-domain.com`, publish the funnel, and point a wildcard DNS record (`*.your-domain.com`) at the same Next.js deployment. The funnel subdomain is the saved `subDomainName` value, for example `piet-counselling-2026.your-domain.com`.
+
+If using the default Vercel project URL, set `NEXT_PUBLIC_DOMAIN` to the project host such as `aexon.vercel.app`. Funnel links then use the path fallback `https://aexon.vercel.app/piet-counselling-2026/`; do not open `piet-counselling-2026.aexon.vercel.app` unless that wildcard domain has been explicitly added in Vercel.
 - Kept the existing Aexon contact form integration intact: it persists the supported name/email contact fields and advances only after the save succeeds. Additional counselling questions remain a future schema/editor enhancement because the current Contact model supports only name and email.
 - Latest funnel rebuild script check: `node --check scripts/rebuild-piet-style.mjs` passed.
 - PIET visual refinement: converted the counselling pages to a green-led palette (`#008F52`, `#075B3B`, `#EAF6EF`, `#F7FAF8`, `#F39A32`) with structured header, hero, programme grid, campus gallery, timeline, enquiry block and footer instead of loose text/image stacking.

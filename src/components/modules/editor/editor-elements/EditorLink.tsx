@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { type EditorElement } from "@/lib/types/editor";
 import { formatTextOnKeyboard } from "@/lib/editor/utils";
 import { cn } from "@/lib/utils";
+import { getFunnelPageHref } from "@/lib/funnels/url";
 
 interface EditorLinkProps {
   element: EditorElement;
@@ -61,7 +62,7 @@ const EditorLink: React.FC<EditorLinkProps> = ({ element }) => {
       )}
       {!Array.isArray(element.content) &&
         (editor.previewMode || editor.liveMode) && (
-          <Link href={element.content.href || "#"}>
+          <Link href={getFunnelPageHref(element.content.href || "#")}>
             {element.content.innerText}
           </Link>
         )}
