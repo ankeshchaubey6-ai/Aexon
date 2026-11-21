@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { v4 as uuidv4 } from "uuid";
 import { Prisma, Tag } from "@prisma/client";
 import { revalidatePath } from "next/cache";
+import { assertSubAccountAccess } from "@/lib/auth/tenant";
 
 /**
  * Get all tickets for a pipeline
@@ -68,6 +69,13 @@ export const upsertTicket = async (
     if (!ticket?.laneId) {
       throw new Error("laneId is required");
     }
+
+    const lane = await db.lane.findUnique({
+      where: { id: ticket.laneId },
+      select: { pipeline: { select: { subAccountId: true } } },
+    });
+    if (!lane) throw new Error("Lane not found");
+    await assertSubAccountAccess(lane.pipeline.subAccountId);
 
     // 🔥 SAFE NAME (prevents trim/undefined crash)
     const safeName =
@@ -168,6 +176,12 @@ export const deleteTicket = async (ticketId: string) => {
   }
 
   try {
+    const ticket = await db.ticket.findUnique({
+      where: { id: ticketId },
+      select: { lane: { select: { pipeline: { select: { subAccountId: true } } } } },
+    });
+    if (!ticket) throw new Error("Ticket not found");
+    await assertSubAccountAccess(ticket.lane.pipeline.subAccountId);
     return await db.ticket.delete({
       where: { id: ticketId },
     });

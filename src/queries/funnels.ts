@@ -256,6 +256,12 @@ export const deleteFunnelPage = async (funnelPageId: string) => {
   }
 
   try {
+    const page = await db.funnelPage.findUnique({
+      where: { id: funnelPageId },
+      select: { funnel: { select: { subAccountId: true } } },
+    });
+    if (!page) throw new Error("Funnel page not found");
+    await assertSubAccountAccess(page.funnel.subAccountId);
     const response = await db.funnelPage.delete({
       where: { id: funnelPageId },
     });

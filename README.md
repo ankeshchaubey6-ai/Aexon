@@ -23,10 +23,12 @@ Updated: 2026-11-21
 - Added `assertSubAccountAccess` and applied it to core sub-account, contact, funnel, media and pipeline reads/writes.
 - Added database-derived dashboard metrics for contact count, ticket count, pipeline value, closed value and conversion rate.
 - Seeded only the verified target with the idempotent `scripts/seed-piet-demo.mjs` script.
-- Seed result: 15 `[DEMO]` contacts, 9 `[DEMO]` tickets, 3 `[DEMO]` lanes, 2 `[DEMO]` funnels and 8 `[DEMO]` funnel pages.
-- Preserved the 3 existing media records and all existing non-demo records.
-- Re-ran the seed successfully; counts stayed unchanged.
-- Existing `[DEMO]` contacts were found in four other sub-accounts; this seed did not create or modify them.
+- Seed result: 15 contacts, 9 tickets, 3 lanes, 2 funnels and 8 funnel pages.
+- Removed the visible demo marker from the target contacts, tickets, lanes, funnel names and page names.
+- Added 4 image assets to the target media library; existing media and unrelated workspaces were preserved.
+- Rebuilt saved funnel content with image-led hero sections, two-column layouts, programme messaging, CTAs and enquiry sections.
+- Added server-backed contact deletion and wired the contact edit action; protected ticket, lane, media and funnel-page mutations with tenant checks.
+- Official PIET information used: Education 4.0 positioning, programme categories, AICTE/Kurukshetra University references, and the Panipat campus context.
 
 ## Next actions
 
@@ -46,6 +48,10 @@ Updated: 2026-11-21
 - Tenant hardening compile check: passed
 - Dashboard metric compile check: passed
 - Demo seed: passed; idempotency and target isolation checked
+- Media/funnel refresh: persisted successfully in the target database
+- Latest TypeScript check: passed
+- Latest tests: passed (12 tests)
+- Latest production build: passed with existing lint warnings
 
 ## Continuation notes
 

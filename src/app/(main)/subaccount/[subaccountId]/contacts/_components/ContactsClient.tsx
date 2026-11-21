@@ -45,6 +45,9 @@ import {
 import { format } from "date-fns";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
+import { useModal } from "@/hooks/use-modal";
+import { deleteContact } from "@/queries/contacts";
+import ContactDetails from "@/components/forms/ContactDetails";
 
 import {
   Table,
@@ -132,6 +135,7 @@ export default function ContactsClient({
   stats,
 }: ContactsClientProps) {
   const router = useRouter();
+  const { setOpen } = useModal();
   const [query, setQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"all" | "active" | "inactive">("all");
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
@@ -177,7 +181,7 @@ export default function ContactsClient({
     if (!selectedContact) return;
     
     try {
-      // TODO: Implement delete contact API
+      await deleteContact(selectedContact.id, subaccountId);
       toast.success(`Contact ${selectedContact.name} deleted`);
       router.refresh();
     } catch (error) {
@@ -550,7 +554,16 @@ export default function ContactsClient({
                               <Eye className="w-3 h-3 mr-2" /> View Details
                             </DropdownMenuItem>
                             <DropdownMenuItem className="text-xs hover:bg-white/5">
-                              <Edit className="w-3 h-3 mr-2" /> Edit
+                              <button
+                                type="button"
+                                className="flex w-full items-center"
+                                onClick={() => setOpen(
+                                  <ContactDetails subAccountId={subaccountId} />,
+                                  async () => ({ contact })
+                                )}
+                              >
+                                <Edit className="w-3 h-3 mr-2" /> Edit
+                              </button>
                             </DropdownMenuItem>
                             <DropdownMenuItem className="text-xs hover:bg-white/5" onClick={() => handleCopyEmail(contact.email)}>
                               <Copy className="w-3 h-3 mr-2" /> Copy Email

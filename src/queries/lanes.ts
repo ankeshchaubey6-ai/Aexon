@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import { type Ticket, type Lane, Prisma } from "@prisma/client";
 import { type LaneDetails } from "@/lib/types";
 import { revalidatePath } from "next/cache";
+import { assertSubAccountAccess } from "@/lib/auth/tenant";
 
 export const getLanesWithTicketsAndTags = async (pipelineId: string) => {
   if (!pipelineId) return [];
@@ -57,6 +58,13 @@ export const updateTicketsOrder = async (tickets: Ticket[]) => {
 export const deleteLane = async (laneId: string) => {
   if (!laneId) throw new Error("laneId is required");
 
+  const lane = await db.lane.findUnique({
+    where: { id: laneId },
+    select: { pipeline: { select: { subAccountId: true } } },
+  });
+  if (!lane) throw new Error("Lane not found");
+  await assertSubAccountAccess(lane.pipeline.subAccountId);
+
   return await db.lane.delete({
     where: { id: laneId },
   });
@@ -70,6 +78,13 @@ export const upsertLane = async (lane: Prisma.LaneUncheckedCreateInput) => {
   if (!lane.name || lane.name.trim() === "") {
     throw new Error("Lane name is required");
   }
+
+  const pipeline = await db.pipeline.findUnique({
+    where: { id: lane.pipelineId },
+    select: { subAccountId: true },
+  });
+  if (!pipeline) throw new Error("Pipeline not found");
+  await assertSubAccountAccess(pipeline.subAccountId);
 
   let order = lane.order ?? 0;
 

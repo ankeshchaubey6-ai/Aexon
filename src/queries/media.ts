@@ -96,6 +96,12 @@ export const deleteMedia = async (mediaId: string) => {
   }
 
   try {
+    const media = await db.media.findUnique({
+      where: { id: mediaId },
+      select: { subAccountId: true },
+    });
+    if (!media) throw new Error("Media not found");
+    await assertSubAccountAccess(media.subAccountId);
     const response = await db.media.delete({
       where: {
         id: mediaId,

@@ -37,6 +37,8 @@ export const searchContacts = async (
       });
     }
 
+    if (subAccountId) await assertSubAccountAccess(subAccountId);
+
     return await db.contact.findMany({
       where: {
         AND: [
@@ -64,6 +66,19 @@ export const searchContacts = async (
     console.error("[searchContacts] ERROR:", error);
     return [];
   }
+};
+
+export const deleteContact = async (contactId: string, subAccountId: string) => {
+  if (!contactId || !subAccountId) throw new Error("Contact and sub-account are required");
+
+  await assertSubAccountAccess(subAccountId);
+  const contact = await db.contact.findFirst({
+    where: { id: contactId, subAccountId },
+    select: { id: true },
+  });
+  if (!contact) throw new Error("Contact not found");
+
+  return db.contact.delete({ where: { id: contactId } });
 };
 
 /**
