@@ -26,6 +26,7 @@ import CustomModal from "@/components/common/CustomModal";
 import FunnelPageDetails from "@/components/forms/FunnelPageDetails";
 import FunnelPagePlaceholder from "@/components/ui/icons/funnel-page-placeholder";
 import FunnelStepCard from "./FunnelStepCard";
+import { getFunnelUrl } from "@/lib/funnels/url";
 
 import { type FunnelsForSubAccount } from "@/lib/types";
 import {
@@ -93,7 +94,9 @@ const FunnelSteps: React.FC<FunnelStepsProps> = ({
     });
   };
 
-  const externalLink = `${process.env.NEXT_PUBLIC_SCHEME}://${funnel.subDomainName}.${process.env.NEXT_PUBLIC_DOMAIN}:3000/${clickedPage?.pathName ?? ""}`;
+  const externalLink = funnel.subDomainName
+    ? getFunnelUrl(funnel.subDomainName, clickedPage?.pathName)
+    : "";
 
   return (
     <AlertDialog>
@@ -193,7 +196,7 @@ const FunnelSteps: React.FC<FunnelStepsProps> = ({
                     </Link>
 
                     <Link
-                      href={externalLink}
+                      href={externalLink || "#"}
                       target="_blank"
                       className="flex items-center justify-center p-2 gap-2 hover:text-primary transition-colors duration-200"
                     >

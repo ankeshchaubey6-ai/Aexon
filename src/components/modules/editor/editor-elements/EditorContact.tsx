@@ -14,6 +14,7 @@ import EditorContactForm from "@/components/forms/EditorContactForm";
 import { cn } from "@/lib/utils";
 import type { EditorElement } from "@/lib/types/editor";
 import type { ContactDetailsSchema } from "@/lib/validators/contact-details";
+import { getFunnelUrl } from "@/lib/funnels/url";
 
 interface EditorContactForm {
   element: EditorElement;
@@ -55,9 +56,7 @@ const EditorContact: React.FC<EditorContactForm> = ({ element }) => {
 
       if (!nextPage) return undefined;
 
-      router.replace(
-        `${process.env.NEXT_PUBLIC_SCHEME}${funnelPages.subDomainName}.${process.env.NEXT_PUBLIC_DOMAIN}/${nextPage.pathName}`
-      );
+      router.replace(getFunnelUrl(funnelPages.subDomainName ?? "", nextPage.pathName));
     }
   };
 
