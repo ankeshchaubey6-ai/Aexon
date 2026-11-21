@@ -42,7 +42,9 @@ const EditorImage: React.FC<EditorImageProps> = ({ element }) => {
       style={element.styles}
       draggable={!editor.liveMode}
       onClick={handleOnClickBody}
-      className={cn("p-0.5 w-full m-1 relative min-h-7 transition-all", {
+      className={cn("relative min-h-7 transition-all", {
+        "p-0.5 m-1": !editor.liveMode,
+        "w-full": !editor.liveMode,
         "border-blue-500 border-solid":
           editor.selectedElement.id === element.id,
         "border-dashed border": !editor.liveMode,

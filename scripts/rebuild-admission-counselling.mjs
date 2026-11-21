@@ -19,7 +19,7 @@ const link = (key, label, href = "#enquiry") => ({
   id: key,
   name: "Link",
   type: "link",
-  styles: { color: "#ffffff", backgroundColor: "#0c5b8f", padding: "13px 22px", borderRadius: "4px", fontWeight: "700" },
+  styles: { display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#ffffff", backgroundColor: "#0c7a4d", padding: "14px 22px", borderRadius: "999px", fontWeight: "800", letterSpacing: ".2px", boxShadow: "0 12px 26px rgba(12,122,77,.18)", transition: "transform .25s ease, box-shadow .25s ease" },
   content: { innerText: label, href },
 });
 
@@ -27,7 +27,7 @@ const image = (key, src, alt) => ({
   id: key,
   name: "Image",
   type: "image",
-  styles: { width: "100%", height: "360px", objectFit: "cover", borderRadius: "8px" },
+  styles: { width: "100%", height: "360px", objectFit: "cover", borderRadius: "22px", boxShadow: "0 24px 56px rgba(9,48,34,.16)", transition: "transform .45s ease, box-shadow .45s ease" },
   content: { src, alt },
 });
 
@@ -58,13 +58,13 @@ const split = (key, left, right, styles = {}) => ({
 const card = (key, title, copy, accent = "#0c5b8f") => container(key, [
   text(`${key}-title`, title, { color: accent, fontSize: "21px", fontWeight: "700", marginBottom: "12px" }),
   text(`${key}-copy`, copy, { color: "#52657a", fontSize: "15px", lineHeight: "1.65" }),
-], { backgroundColor: "#ffffff", border: "1px solid #dbe7ef", borderTop: `4px solid ${accent}`, borderRadius: "8px", minHeight: "170px", boxShadow: "0 12px 30px rgba(16,36,62,.08)" });
+], { flex: "1 1 235px", backgroundColor: "#ffffff", border: "1px solid #dcefe3", borderTop: `4px solid ${accent}`, borderRadius: "18px", minHeight: "178px", boxShadow: "0 15px 36px rgba(9,48,34,.08)", transition: "transform .3s ease, box-shadow .3s ease" });
 
 const contactForm = (key) => ({
   id: key,
   name: "Contact Form",
   type: "contactForm",
-  styles: { backgroundColor: "#ffffff", padding: "24px", borderRadius: "8px" },
+  styles: { backgroundColor: "#ffffff", padding: "30px", borderRadius: "22px", boxShadow: "0 24px 60px rgba(7,62,46,.16)" },
   content: {
     formTitle: "Request admission counselling",
     formDescription: "Share your name and email. Use fictional details for this private academic presentation.",
@@ -73,16 +73,34 @@ const contactForm = (key) => ({
 });
 
 const footer = section("footer", [
-  image("footer-logo", asset("piet-logo.png"), "Panipat Institute of Engineering and Technology logo"),
+  image("footer-logo", asset("piet-logo.png"), "Panipat Institute of Engineering and Technology logo", { width: "110px", height: "68px", objectFit: "contain", objectPosition: "left center", boxShadow: "none", borderRadius: "0" }),
   text("footer-address", "70, Milestone GT Road, Samalkha, Panipat, Haryana — 132102", { color: "#dbeafe", marginTop: "18px" }),
   text("footer-note", "Academic demonstration website developed as part of a student project. Not an official PIET admissions portal.", { color: "#9fb5c8", fontSize: "13px", marginTop: "18px" }),
 ], { backgroundColor: "#10243e", color: "#ffffff", padding: "46px 24px" });
 
+const header = () => section("site-header", [
+  container("header-shell", [
+    container("brand", [
+      image("site-logo", asset("piet-logo.png"), "PIET logo", { width: "78px", height: "58px", objectFit: "contain", objectPosition: "left center", boxShadow: "none", borderRadius: "0" }),
+      container("brand-copy", [
+        text("brand-piet", "PIET", { color: "#07543a", fontSize: "22px", fontWeight: "900", letterSpacing: "2px", padding: "0" }),
+        text("brand-name", "PANIPAT INSTITUTE OF ENGINEERING & TECHNOLOGY", { color: "#527264", fontSize: "9px", fontWeight: "800", letterSpacing: ".45px", padding: "0" }),
+      ], { padding: "0", marginLeft: "8px" }),
+    ], { display: "flex", alignItems: "center", width: "310px", padding: "0" }),
+    container("header-nav", [
+      link("nav-home", "HOME", "/", { color: "#1f4a3a", backgroundColor: "transparent", boxShadow: "none", padding: "9px 11px", fontSize: "12px" }),
+      link("nav-about", "ABOUT", "/about", { color: "#1f4a3a", backgroundColor: "transparent", boxShadow: "none", padding: "9px 11px", fontSize: "12px" }),
+      link("nav-programmes", "PROGRAMMES", "/programmes", { color: "#1f4a3a", backgroundColor: "transparent", boxShadow: "none", padding: "9px 11px", fontSize: "12px" }),
+      link("nav-process", "PROCESS", "/admission-process", { color: "#1f4a3a", backgroundColor: "transparent", boxShadow: "none", padding: "9px 11px", fontSize: "12px" }),
+    ], { display: "flex", flex: "1 1 320px", justifyContent: "flex-end", gap: "2px", padding: "0", flexWrap: "wrap" }),
+    link("header-enquire", "ENQUIRE NOW", "/enquiry", { padding: "11px 17px", fontSize: "12px" }),
+  ], { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "14px", flexWrap: "wrap", padding: "8px 0" }),
+], { backgroundColor: "#ffffff", padding: "10px 24px", borderBottom: "1px solid #e2efe7" });
+
 const pageContent = {
   home: JSON.stringify([{
-    id: "__body", name: "Body", type: "__body", styles: { backgroundColor: "#f5f8fb", color: "#10243e", padding: "0" }, content: [
-      section("topbar", [text("topbar-copy", "ADMISSIONS & STUDENT COUNSELLING  |  EDUCATION 4.0", { color: "#ffffff", fontSize: "12px", fontWeight: "700", letterSpacing: "1.5px" })], { backgroundColor: "#0c5b8f", padding: "10px 24px" }),
-      section("header", [image("header-logo", asset("piet-logo.png"), "PIET logo"), text("nav", "Home   About PIET   Academic Programmes   Engineering   Admission Process   Counselling   Contact", { color: "#10243e", fontWeight: "700", fontSize: "14px", marginTop: "16px" }), link("header-cta", "Enquire Now")], { backgroundColor: "#ffffff", padding: "22px 24px" }),
+    id: "__body", name: "Body", type: "__body", styles: { backgroundColor: "#f7fbf8", color: "#10243e", padding: "0", fontFamily: "Inter, Arial, sans-serif" }, content: [
+      ...header(),
       section("hero", [split("hero-split", [text("hero-kicker", "PANIPAT INSTITUTE OF ENGINEERING & TECHNOLOGY", { color: "#f0b429", fontWeight: "700", letterSpacing: "2px", fontSize: "13px", marginBottom: "16px" }), text("hero-heading", "Shape your future with quality education and innovation.", { color: "#ffffff", fontSize: "46px", fontWeight: "800", lineHeight: "1.08", marginBottom: "18px" }), text("hero-copy", "Explore academic programmes, discover opportunities in engineering and technology, and take the next step towards your educational journey.", { color: "#dbeafe", fontSize: "18px", lineHeight: "1.7", marginBottom: "24px" }), link("hero-link", "Explore Programmes")], [image("hero-image", asset("student-life.jpg"), "Students at PIET campus")], { alignItems: "center" })], { backgroundColor: "#10243e", color: "#ffffff", padding: "78px 24px" }),
       section("welcome", [split("welcome-split", [text("welcome-kicker", "WELCOME TO PIET", { color: "#138a62", fontWeight: "700", letterSpacing: "1.5px" }), text("welcome-heading", "An academic environment designed for the future", { fontSize: "34px", fontWeight: "800", lineHeight: "1.15", margin: "14px 0" }), text("welcome-copy", "PIET's official admissions material presents a multidisciplinary institution focused on engineering, management, technology and pharmacy, with an Education 4.0 orientation. Verify current programme, eligibility and admission details through official PIET channels.", { color: "#52657a", fontSize: "17px", lineHeight: "1.75", marginBottom: "22px" }), link("welcome-link", "Learn about PIET")], [image("welcome-image", asset("campus-gallery-1.jpg"), "PIET campus view")])]),
       section("programmes", [text("programmes-kicker", "ACADEMIC PROGRAMMES", { color: "#138a62", fontWeight: "700", letterSpacing: "1.5px", textAlign: "center" }), text("programmes-heading", "Find the programme that fits your ambition", { fontSize: "34px", fontWeight: "800", textAlign: "center", margin: "12px 0 28px" }), container("programme-grid", [card("engineering", "Engineering & Technology", "B.Tech pathways across Computer Science, AI & Data Science, AI & Machine Learning, Cyber Security, IT, ECE, Mechanical, Civil and Textile Engineering.", "#0c5b8f"), card("management", "Management", "Explore BBA and MBA pathways for business, leadership and professional growth.", "#138a62"), card("applications", "Computer Applications", "BCA and MCA pathways for learners interested in software, data and digital systems.", "#f0b429"), card("pharmacy", "Pharmacy & Diploma", "B.Pharm, D.Pharm and Diploma in Mechanical Engineering information, subject to official confirmation.", "#b85c38")], { display: "flex", gap: "18px", flexWrap: "wrap" })]),

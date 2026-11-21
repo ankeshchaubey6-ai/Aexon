@@ -65,7 +65,8 @@ const EditorContainer: React.FC<EditorContainerProps> = ({ element }) => {
     <div
       style={styles}
       className={cn("relative transition-all group", {
-        "max-w-full w-full p-4": type === "container" || type === "2Col",
+        "max-w-full w-full p-4":
+          !editor.liveMode && (type === "container" || type === "2Col"),
 
         "h-fit": type === "container",
 

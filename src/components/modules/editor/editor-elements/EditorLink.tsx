@@ -41,14 +41,22 @@ const EditorLink: React.FC<EditorLinkProps> = ({ element }) => {
     formatTextOnKeyboard(event, editor, dispatch);
   };
 
+  const isInline =
+    element.styles.display === "inline" ||
+    element.styles.display === "inline-block" ||
+    element.styles.display === "inline-flex";
+
   return (
     <div
       style={element.styles}
       draggable={!editor.liveMode}
       onClick={handleOnClickBody}
       className={cn(
-        "p-0.5 w-full m-1 relative text-base min-h-7 transition-all underline-offset-4",
+        "relative text-base min-h-7 transition-all underline-offset-4",
         {
+          "p-0.5 m-1": !editor.liveMode,
+          "w-full": !isInline,
+          "w-auto": isInline,
           "!border-blue-500 !border-solid":
             editor.selectedElement.id === element.id,
           "!border-dashed !border": !editor.liveMode,

@@ -44,7 +44,8 @@ const EditorSection: React.FC<EditorSectionProps> = ({ element }) => {
   return (
     <section
       style={element.styles}
-      className={cn("relative p-4 transition-all", {
+      className={cn("relative transition-all", {
+        "p-4": !editor.liveMode,
         "border-blue-500":
           editor.selectedElement.id === element.id && !editor.liveMode,
         "border-solid":
