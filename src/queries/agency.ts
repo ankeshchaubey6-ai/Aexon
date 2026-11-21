@@ -28,6 +28,29 @@ export const getAgencyDetails = async (agencyId: string) => {
   }
 };
 
+export const getAgencyDashboardDetails = async (agencyId: string) => {
+  if (!agencyId) return null;
+
+  try {
+    return await db.agency.findUnique({
+      where: { id: agencyId },
+      select: {
+        id: true,
+        name: true,
+        goal: true,
+        connectAccountId: true,
+        customerId: true,
+        _count: {
+          select: { subAccounts: true },
+        },
+      },
+    });
+  } catch (error) {
+    logger(error);
+    return null;
+  }
+};
+
 export const updateAgencyDetails = async (
   agencyId: string,
   agencyDetails: Partial<Agency>

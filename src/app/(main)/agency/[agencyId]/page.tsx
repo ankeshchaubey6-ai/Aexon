@@ -35,10 +35,8 @@ import {
   AlertCircle,
 } from "lucide-react";
 
-import { getAgencyDetails } from "@/queries/agency";
-import { getSubAccountsByAgency } from "@/queries/subaccount";
+import { getAgencyDashboardDetails } from "@/queries/agency";
 
-import { AreaChart } from "@/components/ui/area-chart";
 import {
   Card,
   CardContent,
@@ -70,8 +68,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-import BlurPage from "@/components/common/BlurPage";
 import { constructMetadata } from "@/lib/utils";
+import DemoDataButton from "@/components/modules/demo-data/DemoDataButton";
 
 interface AgencyIdPageProps {
   params: {
@@ -84,18 +82,15 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
 
   if (!agencyId) redirect("/agency/unauthorized");
 
-  let currency: string = "INR";
-  let totalClosedSessions: any[] = [];
-  let totalPendingSessions;
   let net: number = 0;
   let potentialIncome: number = 0;
   let closingRate: number = 0;
 
-  const agencyDetails = await getAgencyDetails(agencyId);
+  const agencyDetails = await getAgencyDashboardDetails(agencyId);
 
   if (!agencyDetails) redirect("/agency/unauthorized");
 
-  const subAccounts = await getSubAccountsByAgency(agencyId);
+  const subAccountCount = agencyDetails._count.subAccounts;
 
   // Mock data for premium feel
   const recentTransactions = [
@@ -109,7 +104,6 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
   const yearlyGrowth = 28.3;
 
   return (
-    <BlurPage>
       <div className="min-h-screen bg-gradient-to-br from-[#0A0F1E] via-[#0F1425] to-[#0A0F1E]">
         {/* Premium Header - COMPACT VERSION matching reference */}
         <div className="relative overflow-hidden">
@@ -155,6 +149,7 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
               
               {/* Quick Stats */}
               <div className="flex items-center space-x-4">
+                <DemoDataButton />
                 <div className="flex items-center space-x-3 bg-white/5 backdrop-blur-md rounded-xl px-4 py-2 border border-white/10">
                   <div className="flex items-center space-x-2">
                     <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse shadow-lg shadow-emerald-500/50" />
@@ -163,7 +158,7 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
                   <Separator orientation="vertical" className="h-4 bg-white/20" />
                   <div className="flex items-center space-x-1">
                     <Activity className="w-3.5 h-3.5 text-white/60" />
-                    <span className="text-xs font-medium text-white">{subAccounts.length}</span>
+                    <span className="text-xs font-medium text-white">{subAccountCount}</span>
                   </div>
                 </div>
 
@@ -230,7 +225,7 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
                 <div className="px-2 py-1 rounded-lg bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border border-emerald-500/20 backdrop-blur-sm">
                   <div className="flex items-center gap-1">
                     <Activity className="w-3 h-3 text-emerald-400" />
-                    <span className="text-[10px] font-medium text-emerald-400">{subAccounts.length} ACTIVE</span>
+                    <span className="text-[10px] font-medium text-emerald-400">{subAccountCount} ACTIVE</span>
                   </div>
                 </div>
               </div>
@@ -282,7 +277,7 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-xs text-white/50">Active Projects</p>
-                  <p className="text-xl font-bold text-white mt-1">{subAccounts.length * 3}</p>
+                  <p className="text-xl font-bold text-white mt-1">{subAccountCount * 3}</p>
                 </div>
                 <div className="p-2 rounded-lg bg-gradient-to-r from-amber-500/20 to-orange-500/20">
                   <Target className="w-4 h-4 text-amber-400" />
@@ -385,7 +380,7 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
                   Active Clients
                 </CardDescription>
                 <CardTitle className="text-3xl font-bold text-white">
-                  {subAccounts.length}
+                  {subAccountCount}
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -420,14 +415,14 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
                 <div className="space-y-2">
                   <div className="flex justify-between text-xs">
                     <span className="text-white/50">Progress</span>
-                    <span className="text-white">{Math.round((subAccounts.length / agencyDetails.goal) * 100)}%</span>
+                    <span className="text-white">{Math.round((subAccountCount / agencyDetails.goal) * 100)}%</span>
                   </div>
                   <Progress 
-                    value={(subAccounts.length / agencyDetails.goal) * 100} 
+                    value={(subAccountCount / agencyDetails.goal) * 100}
                     className="h-2 bg-white/10 [&>div]:bg-gradient-to-r [&>div]:from-[#4F46E5] [&>div]:to-[#7C3AED]"
                   />
                   <p className="text-xs text-white/40 mt-2">
-                    {subAccounts.length} of {agencyDetails.goal} sub accounts
+                    {subAccountCount} of {agencyDetails.goal} sub accounts
                   </p>
                 </div>
               </CardContent>
@@ -469,15 +464,9 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
                 </div>
               </CardHeader>
               <CardContent>
-                <AreaChart
-                  className="text-white stroke-[#4F46E5]"
-                  data={[...(totalClosedSessions || []), ...(totalPendingSessions || [])]}
-                  index="created"
-                  categories={["amount_total"]}
-                  colors={["#4F46E5"]}
-                  yAxisWidth={50}
-                  showAnimation={true}
-                />
+                <div className="flex min-h-[220px] items-center justify-center text-sm text-white/50">
+                  No transaction data available yet.
+                </div>
               </CardContent>
             </Card>
 
@@ -505,7 +494,7 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
                         <div className="flex items-center gap-2">
                           <ShoppingCart className="w-4 h-4 text-emerald-400" />
                           <span className="text-white text-sm">
-                            {totalClosedSessions?.length || 0} Won
+                            0 Won
                           </span>
                         </div>
                         <div className="flex items-center gap-2">
@@ -596,7 +585,6 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
             </CardContent>
           </Card>
         </div>
-      </div>
 
       {/* Animations */}
       <style>{`
@@ -614,7 +602,7 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
           animation: gradient-x 15s ease infinite;
         }
       `}</style>
-    </BlurPage>
+      </div>
   );
 };
 

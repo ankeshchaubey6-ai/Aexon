@@ -6,6 +6,7 @@
  */
 
 import { ensureAllImagesProxied } from "@/lib/ai/sanitizeOutput";
+import { describe, expect, it } from "vitest";
 import {
   validateFileImageProxying,
   validateFilesImageProxying,

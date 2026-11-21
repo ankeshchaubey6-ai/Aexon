@@ -9,13 +9,22 @@ import {
 import { getAuthUserDetails } from "@/queries/auth";
 import MenuOptions from "./MenuOptions";
 
+type AuthUserDetails = NonNullable<
+  Awaited<ReturnType<typeof getAuthUserDetails>>
+>;
+
 interface SidebarProps {
   id: string;
   type: "agency" | "subaccount";
+  user?: AuthUserDetails;
 }
 
-const Sidebar: React.FC<SidebarProps> = async ({ id, type }) => {
-  const user = await getAuthUserDetails();
+const Sidebar: React.FC<SidebarProps> = async ({
+  id,
+  type,
+  user: initialUser,
+}) => {
+  const user = initialUser ?? (await getAuthUserDetails());
 
   if (!user || !user.agency) return null;
 

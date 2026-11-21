@@ -75,7 +75,7 @@ const SubAccountIdLayout: React.FC<SubAccountIdLayoutProps> = async ({
   return (
     <div className="h-screen w-full overflow-hidden bg-background">
       {/* Sidebar */}
-      <Sidebar id={subaccountId} type="subaccount" />
+      <Sidebar id={subaccountId} type="subaccount" user={authUser} />
 
       {/* Page content wrapper */}
       <SubAccountContent
@@ -90,4 +90,3 @@ const SubAccountIdLayout: React.FC<SubAccountIdLayoutProps> = async ({
 };
 
 export default SubAccountIdLayout;
-

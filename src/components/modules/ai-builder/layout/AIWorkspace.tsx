@@ -11,12 +11,12 @@ import React, {
   ComponentType,
 } from "react";
 import { useParams } from "next/navigation";
+import dynamic from "next/dynamic";
 
 import ChatPanel from "../chat/ChatPanel";
 import ProjectSidebar from "../chat/ProjectSidebar";
 import LivePreview from "../preview/LivePreview";
 import FileExplorer from "../explorer/FileExplorer";
-import MonacoEditor from "../editor/MonacoEditor";
 import { useAIBuilderStore } from "../state/ai-builder.store";
 import { useWebContainer, resetContainer } from "../state/use-webcontainer";
 import { cn } from "@/lib/utils";
@@ -28,6 +28,18 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+const MonacoEditor = dynamic(() => import("../editor/MonacoEditor"), {
+  ssr: false,
+  loading: () => (
+    <div
+      className="flex h-full items-center justify-center text-sm text-muted-foreground"
+      role="status"
+    >
+      Loading code editor...
+    </div>
+  ),
+});
 
 // -----------------------------------------------------------------------------
 // Types & Constants

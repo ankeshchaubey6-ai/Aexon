@@ -1,14 +1,29 @@
 "use client";
 
 import React from "react";
+import dynamic from "next/dynamic";
 import { cn } from "@/lib/utils";
 import { Bot, User, Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+
+const SyntaxHighlighter = dynamic(
+  () =>
+    import("react-syntax-highlighter").then(
+      (module) => module.Prism
+    ),
+  {
+    ssr: false,
+    loading: () => (
+      <pre className="overflow-x-auto rounded bg-black/20 p-3 text-xs text-muted-foreground">
+        Loading code preview...
+      </pre>
+    ),
+  }
+);
 
 export type AIMessage = {
   id: string;

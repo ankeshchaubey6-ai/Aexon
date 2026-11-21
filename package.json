@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "vitest run",
     "postinstall": "prisma generate",
     "build:snapshot": "node scripts/build-snapshot.mjs",
     "validate:snapshot": "node scripts/validate-snapshot.mjs",
@@ -105,7 +106,8 @@
     "prisma": "^5.22.0",
     "tailwindcss": "^3.3.0",
     "typescript": "^5.3.3",
-    "vite": "^4.5.3"
+    "vite": "^4.5.3",
+    "vitest": "^0.34.6"
   },
   "optionalDependencies": {
     "@esbuild/linux-x64": "^0.28.0",

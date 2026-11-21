@@ -50,7 +50,7 @@ const AgencyIdLayout: React.FC<AgencyIdLayoutProps> = async ({
   return (
     <div className="h-screen w-full overflow-hidden bg-background">
       {/* Sidebar (fixed on left) */}
-      <Sidebar id={agencyId} type="agency" />
+      <Sidebar id={agencyId} type="agency" user={authUser} />
 
       {/* 🔥 CONTENT WRAPPER — NO HARD PADDING */}
       <div className="layout-content h-full relative">
