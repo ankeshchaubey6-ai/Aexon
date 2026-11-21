@@ -1,10 +1,10 @@
 # AI Continuation Handoff
 
-Updated: 2026-11-21
+Updated: 2026-11-22
 
 ## Current status
 
-- Piet admission demo implementation has **not started**; audit is in progress.
+- Piet admission implementation is complete for the current local demonstration scope; continue from the latest verification notes below.
 - Target: configured demo account → `Vertex Solutions` → `Piet Admission`.
 - The app is a Next.js 14 + Prisma/MySQL + Clerk SaaS with contacts, pipeline, media, funnels and a page builder.
 - Do not seed data until the authenticated user, agency and sub-account are resolved by real database IDs and confirmed.
@@ -32,11 +32,11 @@ Updated: 2026-11-21
 
 ## Next actions
 
-1. Audit `prisma/schema.prisma`, auth, tenant authorization, contacts, pipeline, media, funnels and the page editor.
-2. Resolve and display exact Clerk user, Prisma user, agency and sub-account IDs; ask for confirmation before inserts.
-3. Add idempotent, `[DEMO]`-marked records only for `Piet admission`.
-4. Verify dynamic metrics, CRUD persistence, funnel pages, enquiry creation and tenant isolation.
-5. Run checks and record actual results below.
+1. If more counselling fields are required, extend the Contact schema/editor deliberately; the current model supports name and email only.
+2. If visual browser review is available, inspect the seven target pages at desktop and mobile widths.
+3. Keep the pre-existing `prisma/dev.db` deletion untouched.
+4. Do not push this local-only redesign unless the user explicitly overrides the supplied brief.
+5. Keep the target funnel and tenant boundaries unchanged in future edits.
 
 ## Verification log
 
@@ -53,10 +53,14 @@ Updated: 2026-11-21
 - Latest tests: passed (12 tests)
 - Latest production build: passed with existing lint warnings
 - Local-only counselling rebuild: completed on 2026-11-22.
-- Rebuilt only `Admission Counselling` into six saved pages: Home, About PIET, Academic Programmes, Admission Process, Admission Enquiry and Thank You.
+- Rebuilt only `Admission Counselling` into seven saved pages: Home, About PIET, Academic Programmes, Campus & Student Experience, Admission Process, Admission Enquiry and Thank You.
 - Added local PIET assets under `public/assets/piet-counselling/` with source URLs in `asset-sources.md`.
 - Did not modify the B.Tech funnel, other funnels, other sub-accounts or GitHub.
-- PIET visual refinement: rebuilt the counselling pages around the official site’s observed deep-blue, institutional-green and orange accent palette, with structured header, hero, programme grid, gallery, timeline, enquiry block and footer instead of loose text/image stacking.
+- Added a dedicated Campus & Student Experience page with balanced landscape image layouts and captions.
+- Updated the Thank You page to confirm the enquiry was successfully recorded in the demonstration workspace, with working Home and Explore Programmes actions.
+- Kept the existing Aexon contact form integration intact: it persists the supported name/email contact fields and advances only after the save succeeds. Additional counselling questions remain a future schema/editor enhancement because the current Contact model supports only name and email.
+- Latest funnel rebuild script check: `node --check scripts/rebuild-piet-style.mjs` passed.
+- PIET visual refinement: converted the counselling pages to a green-led palette (`#008F52`, `#075B3B`, `#EAF6EF`, `#F7FAF8`, `#F39A32`) with structured header, hero, programme grid, campus gallery, timeline, enquiry block and footer instead of loose text/image stacking.
 - Pipeline presentation/performance update: added a first-time-user stage explainer, live opportunity/value summary, clearer admission-opportunity cards and optimistic drag-and-drop updates.
 - Pipeline page loading now uses one authorized workspace query instead of separate repeated pipeline/lanes/sub-account fetches.
 - Pipeline TypeScript check: passed; tests: passed (12 tests).
