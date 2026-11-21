@@ -69,9 +69,6 @@ import {
 } from "@/components/ui/table";
 
 import { constructMetadata } from "@/lib/utils";
-import DemoDataButton from "@/components/modules/demo-data/DemoDataButton";
-
-export const maxDuration = 60;
 
 interface AgencyIdPageProps {
   params: {
@@ -151,7 +148,6 @@ const AgencyIdPage: React.FC<AgencyIdPageProps> = async ({ params }) => {
               
               {/* Quick Stats */}
               <div className="flex items-center space-x-4">
-                <DemoDataButton />
                 <div className="flex items-center space-x-3 bg-white/5 backdrop-blur-md rounded-xl px-4 py-2 border border-white/10">
                   <div className="flex items-center space-x-2">
                     <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse shadow-lg shadow-emerald-500/50" />
