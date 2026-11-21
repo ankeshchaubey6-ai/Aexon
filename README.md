@@ -62,6 +62,7 @@ Updated: 2026-11-22
 - Published the target `Admission Counselling` funnel at subdomain `piet-counselling-2026` and replaced the old plain-text header navigation with saved link elements for Home, About, Programmes, Campus Life, Admission Process and Counselling.
 - Verified the target funnel is `published: true` with seven ordered pages; B.Tech and other funnels were not changed.
 - Rebuilt only `B.Tech Admission Enquiry` (`c3c2c3c0-3000-4d00-9000-000000000001`) into a futuristic four-page admissions microsite: Home, Courses, Enquiry and Thank You. It uses the existing Aexon page system, local PIET assets, connected navigation, a structured enquiry panel and is published.
+- Refined the B.Tech microsite with a clearer PIET brand lockup/name, richer image gallery, brighter green/cyan/orange accents, animated image/card transitions using existing global motion utilities, and stronger PIET labels across the header and calls to action.
 - Fixed deployed funnel URL generation so missing environment variables no longer produce `undefined://...undefined`; dashboard links now derive protocol/host/port safely and form success stays on the current funnel host.
 
 ## Funnel deployment notes
