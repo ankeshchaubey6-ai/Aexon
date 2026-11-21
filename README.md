@@ -82,6 +82,8 @@ If using the default Vercel project URL, set `NEXT_PUBLIC_DOMAIN` to the project
 - Pipeline page loading now uses one authorized workspace query instead of separate repeated pipeline/lanes/sub-account fetches.
 - Pipeline TypeScript check: passed; tests: passed (12 tests).
 - Site-wide speed pass: request-scoped auth caching added, notification payloads capped to the latest 100 records, and pipeline page data consolidated into one authorized workspace fetch.
+- Visual shell cleanup: removed the full-screen BlurPage backdrop and disabled repeated decorative glow layers so pages no longer show stacked translucent panels or circular light overlays.
+- Latest visual cleanup verification: TypeScript passed, 12 tests passed, and production build passed with existing lint/image/hook warnings and expected dynamic API-route messages.
 
 ## Continuation notes
 

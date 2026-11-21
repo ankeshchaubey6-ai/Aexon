@@ -71,6 +71,22 @@
   }
 }
 
+/* Keep dashboard pages on one stable surface. Individual legacy pages used
+   fixed decorative glow layers that stacked over the shared page shell. */
+#blur-page > div > .fixed {
+  display: none !important;
+}
+
+#blur-page .fixed.pointer-events-none,
+#blur-page .blur-3xl {
+  display: none !important;
+}
+
+#blur-page {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 /* ============================================================================
    COLOR SYSTEM — ADVANCED THEMING
    ========================================================================== */
