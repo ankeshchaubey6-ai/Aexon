@@ -71,6 +71,8 @@ import {
 import { constructMetadata } from "@/lib/utils";
 import DemoDataButton from "@/components/modules/demo-data/DemoDataButton";
 
+export const maxDuration = 30;
+
 interface AgencyIdPageProps {
   params: {
     agencyId: string | undefined;

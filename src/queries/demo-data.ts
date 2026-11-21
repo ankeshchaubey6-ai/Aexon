@@ -617,7 +617,7 @@ export async function seedAgencyDemoData() {
 
       if (pageCreated) counts.funnelPages += 1;
     }
-  });
+  }, { maxWait: 10_000, timeout: 20_000 });
 
   revalidatePath(`/agency/${agencyId}`);
   revalidatePath(`/agency/${agencyId}/all-subaccounts`);
